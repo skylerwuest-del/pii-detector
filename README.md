@@ -16,12 +16,13 @@ Install 64-bit Python 3.11 or newer with a compatible PyTorch CPU wheel. In Powe
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python -m pip install "torch>=2.9,<3" --index-url https://download.pytorch.org/whl/cpu
+.\.venv\Scripts\python -m pip install -r requirements.txt
 .\.venv\Scripts\python demo.py
 .\.venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-Activation is optional; these commands avoid activation-policy changes. To activate: `.\.venv\Scripts\Activate.ps1`. PyTorch is the only direct third-party dependency. Tests use standard-library `unittest`. Dependency installation requires network access once; the application runs offline.
+Activation is optional; these commands avoid activation-policy changes. To activate: `.\.venv\Scripts\Activate.ps1`. PyTorch and NumPy are the direct third-party dependencies. NumPy enables PyTorch interoperability without startup warnings. Tests use standard-library `unittest`. Dependency installation requires network access once; the application runs offline.
 
 The demo generates fictional data, trains with per-epoch losses, evaluates held-out data, saves the best validation checkpoint, ranks the synthetic tree, and inspects supported files. It then exercises the full-mode pipeline on the **same synthetic directory with the same predictor instance**, explicitly approving synthetic inspection. It never discovers or scans real drives.
 
@@ -174,4 +175,4 @@ Suggested Lesson 41 extensions (confirm against your course rubric): larger inde
 
 The complete synthetic demo ran on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The default seed produced test precision 1.0000, recall 0.9722 and F1 0.9859. Convolution weights changed by up to 0.322566. Validation selected epoch 2 (loss about 0.6989); subsequent training loss fell while validation loss rose. This is **overfitting evidence**, despite the favorable small test score, and motivates a larger independent validation corpus for Lesson 41. The training script explicitly reports this and retains the early checkpoint.
 
-The synthetic demo verified Windows `tree /F /A`, ranking and limited inspection in both pipelines. Automated tests include native Windows junction restrictions, fixed-drive API filtering with mocked drive types, approval gates, unsupported-file handling and original-path reporting. No broad real-drive traversal or real personal-file inspection was performed. PyTorch may emit a missing-NumPy interoperability warning on a minimal installation; this project does not use NumPy and training/tests still work.
+The synthetic demo verified Windows `tree /F /A`, ranking and limited inspection in both pipelines. Automated tests include native Windows junction restrictions, fixed-drive API filtering with mocked drive types, approval gates, unsupported-file handling and original-path reporting. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings. Existing environments are checked and repaired by the launcher on the next run.

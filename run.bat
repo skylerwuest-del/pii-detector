@@ -91,7 +91,7 @@ exit /b %errorlevel%
 :runtime
 call :environment
 if errorlevel 1 exit /b 1
-"%PYTHON%" -c "import torch" >nul 2>&1
+"%PYTHON%" -c "import numpy; import torch; torch.from_numpy(numpy.zeros(1))" >nul 2>&1
 if not errorlevel 1 exit /b 0
 call :install
 exit /b %errorlevel%
@@ -124,9 +124,11 @@ exit /b 1
 
 :install
 echo Installing CPU dependencies. Internet access is required for this step.
-"%PYTHON%" -m pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu
+"%PYTHON%" -m pip install "torch>=2.9,<3" --index-url https://download.pytorch.org/whl/cpu
 if errorlevel 1 exit /b 1
-"%PYTHON%" -c "import torch"
+"%PYTHON%" -m pip install -r requirements.txt
+if errorlevel 1 exit /b 1
+"%PYTHON%" -c "import numpy; import torch; torch.from_numpy(numpy.zeros(1)); print('PyTorch', torch.__version__, 'is ready (CPU).')"
 exit /b %errorlevel%
 
 :failed
