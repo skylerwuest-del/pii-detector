@@ -6,6 +6,12 @@ Use generated synthetic files for demonstrations. Other directories and computer
 
 ## Windows installation and complete demonstration
 
+For the quickest start, install 64-bit Python 3.11 or newer, then double-click **`run.bat`** (or run `.\run.bat` from PowerShell). The launcher works from any working directory. Choose **1** for a controlled directory scan or **2** for a full computer scan. On first use it creates `.venv`, installs CPU dependencies (internet required), and generates synthetic training data and trains if no checkpoint exists. Later scans reuse the saved checkpoint. Full scans keep the existing `SCAN` and `INSPECT` approval prompts.
+
+The launcher also offers **3** to regenerate synthetic data and retrain (replaces the saved checkpoint), **4** for the complete synthetic demo (also regenerates data and retrains), **5** to open `config.py` in Notepad, **6** to install or repair dependencies, and **0** to exit. Edit variables directly in `config.py`; use option 3 after changing model, encoder, or training settings. Returning with `back` from mode 1 returns to the launcher menu; `exit` also ends that mode and returns to the launcher. A failed operation shows its error and returns to the menu.
+
+Manual installation is also available:
+
 Install 64-bit Python 3.11 or newer with a compatible PyTorch CPU wheel. In PowerShell, from the checkout:
 
 ```powershell
