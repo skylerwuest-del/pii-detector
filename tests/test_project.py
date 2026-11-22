@@ -124,7 +124,9 @@ class ProjectTests(unittest.TestCase):
 
     def test_inspection_categories_and_no_values(self):
         result = inspect_file(self.file, self.root)
-        self.assertTrue(all(result["indicators"].values()))
+        for category in ("Name", "Email", "Phone", "SSN"):
+            self.assertTrue(result["indicators"][category], category)
+        self.assertEqual(result["severity"], "High")  # An SSN-like value is the strongest clue.
         self.assertNotIn("fake@example.invalid", str(result))
         self.file.write_text("General documentation only", encoding="utf-8")
         self.assertEqual(inspect_file(self.file, self.root)["status"], "No supported PII indicators detected")

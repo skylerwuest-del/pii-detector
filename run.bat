@@ -15,10 +15,16 @@ echo [3] Generate data and train / retrain
 echo [4] Run complete synthetic demo
 echo [5] Open settings ^(config.py^)
 echo [6] Install / repair dependencies
+echo [7] Review flagged files ^(open, keep, quarantine, recycle^)
+echo [8] Open the last HTML report
+echo [9] Full menu ^(settings, restore, model details^)
 echo [0] Exit
 echo.
-choice /c 1234560 /n /m "Select an option: "
-if errorlevel 7 goto done
+choice /c 1234567890 /n /m "Select an option: "
+if errorlevel 10 goto done
+if errorlevel 9 goto fullmenu
+if errorlevel 8 goto report
+if errorlevel 7 goto review
 if errorlevel 6 goto setup
 if errorlevel 5 goto settings
 if errorlevel 4 goto demo
@@ -37,6 +43,28 @@ goto menu
 call :ready
 if errorlevel 1 goto failed
 "%PYTHON%" -c "from main import full_mode; full_mode()"
+if errorlevel 1 goto failed
+goto menu
+
+:review
+call :runtime
+if errorlevel 1 goto failed
+"%PYTHON%" main.py review
+if errorlevel 1 goto failed
+pause
+goto menu
+
+:report
+call :runtime
+if errorlevel 1 goto failed
+"%PYTHON%" main.py report
+if errorlevel 1 goto failed
+goto menu
+
+:fullmenu
+call :ready
+if errorlevel 1 goto failed
+"%PYTHON%" main.py
 if errorlevel 1 goto failed
 goto menu
 
@@ -128,6 +156,11 @@ echo Installing CPU dependencies. Internet access is required for this step.
 if errorlevel 1 exit /b 1
 "%PYTHON%" -m pip install -r requirements.txt
 if errorlevel 1 exit /b 1
+rem Optional PDF reading; a failure here only means PDFs are ranked but not opened.
+"%PYTHON%" -m pip install -r requirements-optional.txt
+if errorlevel 1 echo Optional PDF/OCR support could not be installed; continuing without it.
+where tesseract >nul 2>&1
+if errorlevel 1 if not exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" echo Tip: to read text in images and scanned PDFs, install Tesseract OCR: winget install UB-Mannheim.TesseractOCR
 "%PYTHON%" -c "import numpy; import torch; torch.from_numpy(numpy.zeros(1)); print('PyTorch', torch.__version__, 'is ready (CPU).')"
 exit /b %errorlevel%
 

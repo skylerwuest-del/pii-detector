@@ -4,3 +4,4 @@ __pycache__/
 data/
 outputs/
 synthetic_demo/
+user_settings.json
