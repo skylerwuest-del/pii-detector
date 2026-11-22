@@ -59,7 +59,12 @@ INCLUDE_HIDDEN_FILES = True  # True includes hidden entries; False reduces cover
 SHOW_SCAN_PROGRESS = True  # True prints counters/time; False produces quieter output.
 INFERENCE_BATCH_SIZE = 64  # Paths per inference; higher uses more memory, lower has more overhead.
 SUPPORTED_EXTENSIONS = [".txt", ".csv", ".tsv", ".log", ".md", ".json", ".xml", ".ini", ".cfg", ".yaml", ".yml", ".gitignore",
-                        ".ics", ".vcf", ".eml", ".docx", ".xlsx", ".pptx", ".pdf", ".zip"]  # Inspected formats; .pdf also needs pypdf installed.
+                        ".ics", ".vcf", ".eml", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt", ".msg", ".pdf", ".zip",
+                        ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"]  # .pdf needs pypdf; images need OCR (below).
+OCR_ENABLED = True  # Read text from images and scanned PDFs when pytesseract, Pillow and Tesseract are installed.
+OCR_TIMEOUT_SECONDS = 30  # Longest OCR time per image; slow images are reported as failed inspections.
+TESSERACT_COMMAND = None  # Full path to tesseract(.exe) if it is not on PATH or in C:\Program Files\Tesseract-OCR.
+MAX_OCR_IMAGES = 10  # Images OCRed per PDF; higher finds more in long scans but takes longer.
 FULL_SCAN_REQUIRE_CONFIRMATION = True  # True requests broad-scan approval; False skips that prompt for authorized automation.
 FULL_SCAN_ALLOW_CONTENT_INSPECTION = True  # True allows a separate approval prompt; False disables broad content inspection.
 EXCLUDED_DIRECTORIES = []  # Additional absolute directory exclusions; more exclusions reduce coverage.

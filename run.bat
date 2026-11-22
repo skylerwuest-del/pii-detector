@@ -158,7 +158,9 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 rem Optional PDF reading; a failure here only means PDFs are ranked but not opened.
 "%PYTHON%" -m pip install -r requirements-optional.txt
-if errorlevel 1 echo Optional PDF support could not be installed; continuing without it.
+if errorlevel 1 echo Optional PDF/OCR support could not be installed; continuing without it.
+where tesseract >nul 2>&1
+if errorlevel 1 if not exist "%ProgramFiles%\Tesseract-OCR\tesseract.exe" echo Tip: to read text in images and scanned PDFs, install Tesseract OCR: winget install UB-Mannheim.TesseractOCR
 "%PYTHON%" -c "import numpy; import torch; torch.from_numpy(numpy.zeros(1)); print('PyTorch', torch.__version__, 'is ready (CPU).')"
 exit /b %errorlevel%
 

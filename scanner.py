@@ -35,6 +35,57 @@ def safe_path(path, root):
     return path.resolve(strict=True)
 
 
+def _final_path_of_handle(fd):
+    """Windows: the real path the OS opened for this descriptor (resolves junctions/links)."""
+    import msvcrt
+    from ctypes import wintypes
+    handle = msvcrt.get_osfhandle(fd)
+    buffer = ctypes.create_unicode_buffer(32768)
+    function = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+    function.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    length = function(handle, buffer, len(buffer), 0)
+    if not length or length >= len(buffer):
+        raise OSError("Could not confirm the opened file's location")
+    text = buffer.value
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("\\\\?\\"):
+        text = text[4:]
+    return Path(text)
+
+
+def safe_open(path, root):
+    """Open a validated regular file for binary reading, closing the check-then-open race.
+
+    1. safe_path validates containment and every component (no links/junctions).
+    2. lstat records which file that is (device + inode) and that it is regular.
+    3. os.open uses O_NOFOLLOW where the OS has it, so a link swapped in is refused.
+    4. fstat on the OPEN descriptor must match step 2; on Windows the handle's final
+       path must also still be inside the root. Anything else is refused.
+    """
+    checked = safe_path(path, root)
+    before = os.lstat(checked)
+    if not stat.S_ISREG(before.st_mode):
+        raise ValueError("Not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(checked, flags)
+    except OSError as error:
+        if getattr(error, "errno", None) == 40:  # ELOOP: the final component became a link.
+            raise ValueError("File was replaced by a link") from error
+        raise
+    try:
+        after = os.fstat(fd)
+        if not stat.S_ISREG(after.st_mode) or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError("File changed between validation and opening")
+        if os.name == "nt" and not within(_final_path_of_handle(fd), Path(root)):
+            raise ValueError("Opened file is outside the selected root")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Navigator:
     def __init__(self, start=None):
         self.current = Path(start or Path.home()).resolve(strict=True)

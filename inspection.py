@@ -9,16 +9,40 @@ import csv
 import email
 from email import policy
 import io
+import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 import config
-from scanner import safe_path
+from scanner import safe_open
 
 try:  # Optional: PDF text extraction. Without it PDFs are ranked but not opened.
     import pypdf
 except ImportError:  # pragma: no cover - depends on the environment
     pypdf = None
+
+
+def _ocr_engine():
+    """pytesseract + Pillow + the Tesseract program, or None when any piece is missing."""
+    if not getattr(config, "OCR_ENABLED", False):
+        return None
+    try:
+        import pytesseract
+        from PIL import Image
+        # The Windows installer does not add Tesseract to PATH; use its standard location.
+        default_windows = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe"
+        if config.TESSERACT_COMMAND:
+            pytesseract.pytesseract.tesseract_cmd = str(config.TESSERACT_COMMAND)
+        elif os.name == "nt" and not shutil.which("tesseract") and default_windows.is_file():
+            pytesseract.pytesseract.tesseract_cmd = str(default_windows)
+        pytesseract.get_tesseract_version()  # Raises when the Tesseract program is not installed.
+        return pytesseract, Image
+    except Exception:
+        return None
+
+
+OCR = _ocr_engine()
 
 NAME_PATTERN = (r"(?im)^\s*(?:name|full[ _]name|employee[ _]name|first[ _]name|last[ _]name)\s*:\s*\S+"
                 r"|^(?:FN|N)(?:;[^:\n]*)?:\s*[^\s;]"  # vCard name lines.
@@ -42,7 +66,16 @@ ROUTING_PATTERN = re.compile(r"(?i)\b(?:routing|aba|rtn)\b[^\n\d]{0,20}(\d{9})(?
 IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b")
 
 CATEGORIES = ["Email", "Phone", "SSN", "Name", "Credit Card", "Date of Birth", "Address",
-              "Passport", "Driver's License", "Bank Account", "IBAN"]
+              "Passport", "Driver's License", "Bank Account", "IBAN", "Schedule"]
+# A personal schedule: a dated, timed entry about a person's own appointment or whereabouts.
+SCHEDULE_DATE = r"(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2})"
+SCHEDULE_LINE = re.compile(
+    r"(?im)^(?=.*" + SCHEDULE_DATE + r")(?=.*\b\d{1,2}(?::\d{2})\s*(?:am|pm)?\b)"
+    r"(?=.*\b(?:appointment|doctor|dentist|therapy|therapist|clinic|pick ?up|drop ?off|visit|flight|interview|"
+    r"meeting with|session|court|school run|surgery)\b).+$")
+CALENDAR_EVENT = re.compile(r"BEGIN:VEVENT(?:(?!END:VEVENT).)*?DTSTART(?:(?!END:VEVENT).)*?(?:LOCATION|ATTENDEE)(?:(?!END:VEVENT).)*?END:VEVENT"
+                            r"|BEGIN:VEVENT(?:(?!END:VEVENT).)*?(?:LOCATION|ATTENDEE)(?:(?!END:VEVENT).)*?DTSTART(?:(?!END:VEVENT).)*?END:VEVENT",
+                            re.S)
 HIGH_RISK = {"SSN", "Credit Card", "Passport", "Driver's License", "Bank Account", "IBAN"}
 
 # CSV/TSV column names that make non-empty cells indicators even without a recognizable pattern.
@@ -55,13 +88,20 @@ COLUMN_CATEGORIES = {
     "passport": "Passport", "passport_number": "Passport", "drivers_license": "Driver's License",
     "driver_license": "Driver's License", "license_number": "Driver's License",
     "account_number": "Bank Account", "bank_account": "Bank Account", "routing_number": "Bank Account",
-    "iban": "IBAN",
+    "iban": "IBAN", "appointment": "Schedule", "appointment_time": "Schedule",
 }
 TEXT_EXTENSIONS = {".txt", ".csv", ".tsv", ".log", ".md", ".json", ".xml", ".ini", ".cfg",
                    ".yaml", ".yml", ".gitignore", ".ics", ".vcf"}
 OFFICE_EXTENSIONS = {".docx", ".xlsx", ".pptx"}
+# Pre-2007 Office and Outlook files are OLE compound files; text is recovered as strings.
+LEGACY_EXTENSIONS = {".doc", ".xls", ".ppt", ".msg"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif"}
 # Formats this module can read. SUPPORTED_EXTENSIONS in config selects among them.
-READABLE_EXTENSIONS = TEXT_EXTENSIONS | OFFICE_EXTENSIONS | {".zip", ".eml"} | ({".pdf"} if pypdf else set())
+READABLE_EXTENSIONS = (TEXT_EXTENSIONS | OFFICE_EXTENSIONS | LEGACY_EXTENSIONS | {".zip", ".eml"}
+                       | ({".pdf"} if pypdf else set()) | (IMAGE_EXTENSIONS if OCR else set()))
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+LEGACY_READ_FACTOR = 4  # Legacy files hold a lot of binary structure; read up to 4x the byte cap.
+OCR_MAX_SIDE = 3000  # Larger images are scaled down before OCR (time and memory bound).
 COUNT_CAP = 999  # Counts are reported without values and capped so a huge file stays cheap.
 MAX_ARCHIVE_MEMBERS = 50  # Files examined inside one zip; nested archives are not opened.
 MAX_PDF_PAGES = 50
@@ -194,25 +234,73 @@ def text_from_bytes(name, raw, budget, truncated=False):
     return text, False, encoding
 
 
-def read_pdf(path, budget):
-    reader = pypdf.PdfReader(str(path))
+def ocr_image(image):
+    """Text from a Pillow image with Tesseract (bounded size and time)."""
+    pytesseract, _ = OCR
+    image = image.convert("L")
+    if max(image.size) > OCR_MAX_SIDE:
+        scale = OCR_MAX_SIDE / max(image.size)
+        image = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))))
+    return pytesseract.image_to_string(image, timeout=config.OCR_TIMEOUT_SECONDS)
+
+
+def read_image(handle, budget):
+    if not OCR:
+        raise ValueError("OCR is not available")
+    _, Image = OCR
+    with Image.open(handle) as image:  # Pillow refuses decompression bombs above its pixel limit.
+        text = ocr_image(image)
+    return text[:budget], len(text) > budget
+
+
+def read_pdf(handle, budget):
+    """Page text; pages with almost no text (scans) are OCRed from their images when OCR is available."""
+    reader = pypdf.PdfReader(handle)
     if reader.is_encrypted:
         raise ValueError("Encrypted PDF")
-    chunks, used = [], 0
+    chunks, used, images_read, ocr_used = [], 0, 0, False
     for page in reader.pages[:MAX_PDF_PAGES]:
         text = page.extract_text() or ""
+        if len(text.strip()) < 20 and OCR and images_read < config.MAX_OCR_IMAGES:
+            _, Image = OCR
+            for embedded in page.images:
+                if images_read >= config.MAX_OCR_IMAGES:
+                    break
+                try:
+                    with Image.open(io.BytesIO(embedded.data)) as picture:
+                        text += "\n" + ocr_image(picture)
+                    ocr_used = True
+                except Exception:  # One unreadable image does not fail the document.
+                    pass
+                images_read += 1
         chunks.append(text)
         used += len(text)
         if used >= budget:
             break
     text = "\n".join(chunks)
-    return text[:budget], used > budget or len(reader.pages) > MAX_PDF_PAGES
+    return text[:budget], used > budget or len(reader.pages) > MAX_PDF_PAGES, ocr_used
 
 
-def read_archive(path, budget):
+def read_legacy(handle, budget):
+    """Printable runs from an OLE file (.doc/.xls/.ppt/.msg): 8-bit text and UTF-16 text.
+
+    This is the `strings` approach rather than a full parser: it recovers body text,
+    cell strings and message properties well enough for pattern checks.
+    """
+    raw = handle.read(budget * LEGACY_READ_FACTOR + 1)
+    if not raw.startswith(OLE_MAGIC):
+        raise ValueError("Not an OLE compound file")
+    truncated = len(raw) > budget * LEGACY_READ_FACTOR
+    runs = [m.decode("cp1252") for m in re.findall(rb"[\x20-\x7e\x80-\xff\t\r\n]{4,}", raw)]
+    runs += [m.decode("utf-16-le", errors="replace") for m in re.findall(rb"(?:[\x20-\x7e\t\r\n]\x00){4,}", raw)]
+    text = "\n".join(runs).replace("\r", "\n")
+    return text[:budget], truncated or len(text) > budget
+
+
+def read_archive(handle, budget):
     """Text of readable members of a zip; nested archives and encrypted members are skipped."""
     chunks, used, members, truncated = [], 0, 0, False
-    with zipfile.ZipFile(path) as archive:
+    with zipfile.ZipFile(handle) as archive:
         for info in archive.infolist():
             if info.is_dir() or extension_of(info.filename) not in (TEXT_EXTENSIONS | OFFICE_EXTENSIONS | {".eml"}):
                 continue
@@ -221,8 +309,8 @@ def read_archive(path, budget):
             if members >= MAX_ARCHIVE_MEMBERS or used >= budget:
                 truncated = True
                 break
-            with archive.open(info) as handle:
-                raw = handle.read(budget - used + 1)
+            with archive.open(info) as member:
+                raw = member.read(budget - used + 1)
             if len(raw) > budget - used:
                 raw, truncated = raw[:budget - used], True
             try:
@@ -258,6 +346,7 @@ def count_indicators(text):
     counts["Credit Card"] = sum(luhn_valid(m.group()) for m in CARD_CANDIDATE.finditer(text))
     counts["Bank Account"] = len(ACCOUNT_PATTERN.findall(text)) + sum(aba_valid(n) for n in ROUTING_PATTERN.findall(text))
     counts["IBAN"] = sum(iban_valid(m.group()) for m in IBAN_PATTERN.finditer(text))
+    counts["Schedule"] = len(SCHEDULE_LINE.findall(text)) + len(CALENDAR_EVENT.findall(text))
     return {name: min(COUNT_CAP, counts.get(name, 0)) for name in CATEGORIES}
 
 
@@ -290,27 +379,33 @@ def inspect_file(path, root):
     if not supported(path):
         return result  # Unsupported files are never opened.
     try:
-        checked = safe_path(path, root)  # Revalidate just before reading.
-        extension = extension_of(checked)
+        extension = extension_of(path)
         budget = config.MAX_INSPECTION_BYTES
-        if extension == ".pdf":
-            text, truncated = read_pdf(checked, budget)
-            result["encoding"] = "pdf"
-        elif extension == ".zip":
-            text, truncated, members = read_archive(checked, budget)
-            result.update(encoding="zip", archive_members=members)
-        elif extension in OFFICE_EXTENSIONS:
-            with zipfile.ZipFile(checked) as archive:  # Seeks on disk; parts are streamed with a cap.
-                text, truncated = office_text(archive, budget)
-            result["encoding"] = "office-xml"
-        else:
-            with checked.open("rb") as handle:
+        # Revalidate and open without following links; every reader uses this one handle.
+        with safe_open(path, root) as handle:
+            if extension == ".pdf":
+                text, truncated, ocr_used = read_pdf(handle, budget)
+                result["encoding"] = "pdf+ocr" if ocr_used else "pdf"
+            elif extension == ".zip":
+                text, truncated, members = read_archive(handle, budget)
+                result.update(encoding="zip", archive_members=members)
+            elif extension in OFFICE_EXTENSIONS:
+                with zipfile.ZipFile(handle) as archive:  # Seeks on disk; parts are streamed with a cap.
+                    text, truncated = office_text(archive, budget)
+                result["encoding"] = "office-xml"
+            elif extension in LEGACY_EXTENSIONS:
+                text, truncated = read_legacy(handle, budget)
+                result["encoding"] = "ole-strings"
+            elif extension in IMAGE_EXTENSIONS:
+                text, truncated = read_image(handle, budget)
+                result["encoding"] = "ocr"
+            else:
                 raw = handle.read(budget + 1)
-            text, cut, encoding = text_from_bytes(checked.name, raw[:budget], budget, len(raw) > budget)
-            truncated = len(raw) > budget or cut
-            result["encoding"] = encoding
+                text, cut, encoding = text_from_bytes(path, raw[:budget], budget, len(raw) > budget)
+                truncated = len(raw) > budget or cut
+                result["encoding"] = encoding
         result["truncated"] = truncated
-        if checked.name.lower() == ".gitignore":
+        if Path(path).name.lower() == ".gitignore":
             clue = bool(re.search(r"(?i)payroll|personnel|contacts|private|employee", text))
             result.update(status="Metadata clues detected" if clue else "No supported metadata clues detected",
                           indicators={"Sensitive pattern metadata clue (not proof of PII)": clue},
