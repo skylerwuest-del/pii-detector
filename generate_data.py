@@ -28,7 +28,58 @@ FAMILIES = [
     ("reference/general_notes/{id}.txt", 0), ("software/config_defaults/{id}.txt", 0),
     ("wages/personnel_payroll/{id}.csv", 1), ("addressbook/contact_emails/{id}.txt", 1),
     ("help/documentation/{id}.txt", 0), ("release/meeting_summary/{id}.txt", 0),
+    # Added for variety: everyday names people actually give files.
+    ("downloads/bank_statement_{id}.csv", 1), ("documents/tax_return_{id}.txt", 1),
+    ("backup/address_book_{id}.csv", 1), ("hr/applicants/resume_{id}.txt", 1),
+    ("medical/patient_records_{id}.csv", 1), ("family/emergency_contacts_{id}.txt", 1),
+    ("src/main_{id}.txt", 0), ("logs/server_{id}.txt", 0), ("recipes/dinner_{id}.txt", 0),
+    ("photos/vacation_plan_{id}.txt", 0), ("data/measurements_{id}.csv", 0),
+    ("templates/blank_form_{id}.txt", 0),
 ]
+
+
+# Word pools for programmatic families. Labels are chosen FIRST (the contents are PII-bearing or
+# benign); words are then drawn with realistic overlap, including misleading decoys, so a
+# filename keyword alone never settles the label.
+SENSITIVE_FOLDERS = ["hr", "finance", "people", "staff", "accounts", "records", "admin", "private", "crm",
+                     "clinic", "school", "payroll", "legal", "insurance", "recruiting", "benefits", "tax"]
+SENSITIVE_NAMES = ["employees", "personnel", "payroll", "customers", "contacts", "salary", "roster", "applicants",
+                   "patients", "members", "clients", "tenants", "students", "donors", "subscribers", "residents",
+                   "beneficiaries", "guests", "drivers", "claimants", "borrowers", "volunteers", "candidates"]
+NEUTRAL_FOLDERS = ["documents", "downloads", "desktop", "backup", "misc", "old", "shared", "archive", "projects",
+                   "data", "exports", "temp", "stuff", "new_folder"]
+NEUTRAL_NAMES = ["item", "data", "export", "list", "records", "dump", "sheet", "file", "report", "copy", "notes", "final"]
+BENIGN_FOLDERS = ["docs", "help", "src", "build", "assets", "examples", "public", "release", "tools", "tests",
+                  "themes", "fonts", "icons", "vendor", "samples", "tutorials", "recipes", "music", "games"]
+BENIGN_NAMES = ["manual", "config", "readme", "guide", "tutorial", "design", "weather", "colors", "api", "changelog",
+                "license", "menu", "inventory_parts", "benchmarks", "lyrics", "translations", "settings", "schedule_public",
+                "release_notes", "shopping_list", "playlist", "budget_template", "meeting_agenda", "style_guide"]
+
+
+def build_families(per_label=70):
+    """Reproducible extra families, independent of RANDOM_SEED so the family list is stable."""
+    rng = random.Random(1936)
+    families = list(FAMILIES)
+    known = {template for template, _ in families}
+    for label in (1, 0):
+        added = 0
+        while added < per_label:
+            if label:
+                folder = rng.choice(SENSITIVE_FOLDERS if rng.random() < 0.65 else NEUTRAL_FOLDERS)
+                name = rng.choice(SENSITIVE_NAMES if rng.random() < 0.75 else NEUTRAL_NAMES)
+            else:
+                folder = rng.choice(BENIGN_FOLDERS if rng.random() < 0.7 else NEUTRAL_FOLDERS if rng.random() < 0.7 else SENSITIVE_FOLDERS)
+                name = rng.choice(BENIGN_NAMES if rng.random() < 0.75 else NEUTRAL_NAMES if rng.random() < 0.6 else SENSITIVE_NAMES)
+            if rng.random() < 0.15:  # Whole-folder families such as people/staff/{id}.csv.
+                template = f"{folder}/{name}/{{id}}"
+            else:
+                template = f"{folder}/{name}_{{id}}"
+            template += rng.choice([".csv", ".txt", ".txt", ".csv", ".tsv", ".log"] if label else [".txt", ".csv", ".md", ".log", ".json", ".txt"])
+            if template not in known:
+                known.add(template)
+                families.append((template, label))
+                added += 1
+    return families
 
 
 def content_for(label, csv_file=False):
@@ -46,8 +97,9 @@ def generate():
     rng = random.Random(config.RANDOM_SEED)
     groups = {key: [] for key in ("train", "validation", "test")}
     # Stratify by content label so every split has both classes.
+    all_families = build_families()
     for label in (0, 1):
-        families = [(i, p) for i, (p, y) in enumerate(FAMILIES) if y == label]
+        families = [(i, p) for i, (p, y) in enumerate(all_families) if y == label]
         rng.shuffle(families)
         a = int(len(families) * config.TRAIN_SPLIT)
         b = a + int(len(families) * config.VALIDATION_SPLIT)
@@ -55,7 +107,9 @@ def generate():
             for family, template in subset:
                 for _ in range(config.EXAMPLES_PER_FAMILY):
                     relative = template.format(id=f"{rng.getrandbits(48):012x}")
-                    text = content_for(label, relative.endswith(".csv"))
+                    text = content_for(label, relative.endswith((".csv", ".tsv")))
+                    if relative.endswith(".tsv"):
+                        text = text.replace(",", "\t")
                     target = config.DATA_DIRECTORY / "corpus" / split / relative
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(text, encoding="utf-8")

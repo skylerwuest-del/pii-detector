@@ -39,8 +39,13 @@ class Navigator:
     def __init__(self, start=None):
         self.current = Path(start or Path.home()).resolve(strict=True)
         self.root = None
+        self.previous = None
 
     def cd(self, destination):
+        if str(destination) == "-":  # Like a shell: return to the previous directory.
+            if self.previous is None:
+                raise ValueError("No previous directory")
+            destination = self.previous
         target = Path(destination).expanduser()
         if not target.is_absolute():
             target = self.current / target
@@ -50,7 +55,7 @@ class Navigator:
             target = target.resolve(strict=True)
         if not target.is_dir():
             raise ValueError("Not a directory")
-        self.current = target
+        self.previous, self.current = self.current, target
 
     def select(self):
         if self.root is not None:
@@ -59,9 +64,62 @@ class Navigator:
             raise ValueError("Cannot select a link")
         self.root = self.current.resolve(strict=True)
 
+    def listing(self):
+        """Directories first, then files: (name, is_dir, size, is_link). Metadata only."""
+        entries = []
+        with os.scandir(self.current) as scanned:
+            for entry in scanned:
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                    linked = is_link(Path(entry.path))
+                    folder = entry.is_dir(follow_symlinks=False)
+                    entries.append((entry.name, folder, 0 if folder else info.st_size, linked))
+                except OSError:
+                    entries.append((entry.name, False, 0, False))
+        return sorted(entries, key=lambda e: (not e[1], e[0].lower()))
 
-def enumerate_files(root, excluded=()):
-    """Yield metadata only, without reading contents or following links."""
+    def tree_lines(self, depth=2, limit=200):
+        """Bounded text tree of the current directory; links are shown but not entered."""
+        lines = []
+        def walk(folder, prefix, remaining):
+            try:
+                with os.scandir(folder) as scanned:
+                    entries = sorted(scanned, key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()))
+            except OSError:
+                lines.append(prefix + "[unreadable]")
+                return
+            for index, entry in enumerate(entries):
+                if len(lines) >= limit:
+                    return
+                last = index == len(entries) - 1
+                linked = is_link(Path(entry.path))
+                folder_entry = entry.is_dir(follow_symlinks=False)
+                lines.append(prefix + ("`-- " if last else "|-- ") + entry.name
+                             + ("/" if folder_entry else "") + (" [link, not followed]" if linked else ""))
+                if folder_entry and not linked and remaining > 1:
+                    walk(entry.path, prefix + ("    " if last else "|   "), remaining - 1)
+        walk(self.current, "", max(1, depth))
+        if len(lines) >= limit:
+            lines.append(f"... (stopped after {limit} entries)")
+        return lines
+
+
+def common_places():
+    """Existing well-known user folders: handy starting points for a scan."""
+    home = Path.home()
+    names = ("Documents", "Downloads", "Desktop", "Pictures", "OneDrive")
+    return [home / name for name in names if (home / name).is_dir()]
+
+
+def enumerate_files(root, excluded=(), stats=None):
+    """Yield metadata only, without reading contents or following links.
+
+    `stats` (optional dict) counts what was skipped so the UI can explain coverage.
+    Each folder is validated once with safe_path; entries are checked as they are read.
+    """
+    def count(key):
+        if stats is not None:
+            stats[key] = stats.get(key, 0) + 1
     root = Path(root).absolute()
     if config.FOLLOW_SYMLINKS:
         raise ValueError("FOLLOW_SYMLINKS must remain False")
@@ -70,8 +128,13 @@ def enumerate_files(root, excluded=()):
             raise ValueError("Root cannot be a link or junction")
         root = root.resolve(strict=True)
     except OSError:
+        count("unreadable")
         return  # An unavailable drive/root does not crash a broad scan.
-    exclusions = [Path(p).resolve() for p in excluded]
+    # String comparison is far cheaper than resolving every entry against every exclusion.
+    exclusions = [os.path.normcase(str(Path(p).resolve())) for p in excluded]
+    def is_excluded(path):
+        key = os.path.normcase(path)
+        return any(key == e or key.startswith(e + os.sep) for e in exclusions)
     stack = [root]
     while stack:
         folder = stack.pop()
@@ -83,18 +146,23 @@ def enumerate_files(root, excluded=()):
                         path = Path(entry.path)
                         info = entry.stat(follow_symlinks=False)
                         if is_link(path):
+                            count("links")
                             continue
                         if not config.INCLUDE_HIDDEN_FILES and (entry.name.startswith(".") or getattr(info, "st_file_attributes", 0) & 2):
+                            count("hidden")
                             continue
-                        if any(path.resolve().is_relative_to(p) for p in exclusions):
+                        if exclusions and is_excluded(entry.path):
+                            count("excluded")
                             continue
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(path)
                         elif stat.S_ISREG(info.st_mode):
-                            yield safe_path(path, root), root
+                            yield path, root
                     except (OSError, ValueError):
+                        count("unreadable")
                         continue
         except (OSError, ValueError):
+            count("unreadable")
             continue
 
 

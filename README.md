@@ -8,7 +8,7 @@ Use generated synthetic files for demonstrations. Other directories and computer
 
 For the quickest start, install 64-bit Python 3.11 or newer, then double-click **`run.bat`** (or run `.\run.bat` from PowerShell). The launcher works from any working directory. Choose **1** for a controlled directory scan or **2** for a full computer scan. On first use it creates `.venv`, installs CPU dependencies (internet required), and generates synthetic training data and trains if no checkpoint exists. Later scans reuse the saved checkpoint. Full scans keep the existing `SCAN` and `INSPECT` approval prompts.
 
-The launcher also offers **3** to regenerate synthetic data and retrain (replaces the saved checkpoint), **4** for the complete synthetic demo (also regenerates data and retrains), **5** to open `config.py` in Notepad, **6** to install or repair dependencies, and **0** to exit. Edit variables directly in `config.py`; use option 3 after changing model, encoder, or training settings. Returning with `back` from mode 1 returns to the launcher menu; `exit` also ends that mode and returns to the launcher. A failed operation shows its error and returns to the menu.
+The launcher also offers **3** to regenerate synthetic data and retrain (replaces the saved checkpoint), **4** for the complete synthetic demo (also regenerates data and retrains), **5** to open `config.py` in Notepad, **6** to install or repair dependencies, and **0** to exit. Edit variables directly in `config.py`; use option 3 after changing model, encoder, or training settings. Inside Python (`python main.py`) the menu offers the same scans plus **3** train/retrain, **4** model details (held-out precision/recall/F1/AUC, saved threshold) and **0** exit; choosing a scan without a trained model offers to train first. Returning with `back` from mode 1 returns to the launcher menu; `exit` also ends that mode and returns to the launcher. A failed operation shows its error and returns to the menu.
 
 Manual installation is also available:
 
@@ -48,9 +48,10 @@ train.py            CPU backpropagation, checkpoint selection, test metrics
 scanner.py          Navigator, root validation, safe enumeration, tree, drive discovery
 inference.py        Shared Predictor, batches, disk-backed ranking, reports
 inspection.py       Limited text/CSV readers and deterministic verification
-main.py             Two-mode menu and explicit approval prompts
+main.py             Menu, navigator shell and explicit approval prompts
+ui.py               Stdlib-only terminal helpers: color (auto-off when piped), tables, progress, loss chart
 demo.py             Complete synthetic-only demonstration
-tests/              Encoder, CNN, boundary, reporting and inspection tests
+tests/              Encoder, CNN, boundary, reporting, inspection, training-method and UI tests
 data/dataset.json   Path, label, template-family ID and split
 data/corpus/        Synthetic contents corresponding to the manifest
 synthetic_demo/     Small authorized example tree
@@ -59,6 +60,8 @@ outputs/training_metrics.json   Loss history, weight change, held-out metrics
 outputs/tree.txt    Controlled-mode directory hierarchy
 outputs/file_paths.txt          Controlled-mode original absolute paths
 outputs/results.csv            Controlled-mode descending scores and ranks
+outputs/inspection_report.csv   Per-file verdicts, severity and indicator COUNTS (never values)
+outputs/seed_study.json         Written by `train.py --seeds N`
 outputs/full_scan_file_paths.txt  Incremental full-mode absolute paths
 outputs/full_scan_results.csv     Full-mode descending scores and ranks
 outputs/*ranking.sqlite3          Disk-backed ranking databases
@@ -68,7 +71,7 @@ The small demo includes employees CSV, schedule text, meeting notes, config text
 
 ## Mode 1: controlled directory navigator
 
-The menu starts `Navigator` in your home directory. Commands: `ls`, `cd <directory>`, `cd ..`, `cd ~`, `pwd`, `select`, `scan`, `help`, `back`, `exit`. Spaces are accepted directly or with double quotes. These are safe Python operations, never arbitrary shell commands.
+The menu starts `Navigator` in your home directory. Commands: `ls` (folders first, sizes), `cd <directory>`, `cd ..`, `cd ~`, `cd -` (previous folder), `pwd`, `tree [depth]`, `places` (Documents, Downloads, Desktop ...), `select`, `scan`, `help`, `back`, `exit`. Tab completes commands and sub-folders where Python's `readline` exists (not on stock Windows). Links are listed but never entered. The prompt turns green with `[root locked]` after `select`. Spaces are accepted directly or with double quotes. These are safe Python operations, never arbitrary shell commands.
 
 Example (replace path):
 
@@ -84,7 +87,7 @@ back
 
 Before selection navigation is unrestricted. After `select`, `Navigator.cd` uses `safe_path` to reject resolved paths outside the root, absolute outside paths, parent escapes and links/junctions. `cd ..` at the root fails; `cd ~` fails if home is outside. `scan` starts at the locked root even when your current directory is a subfolder. Return to the main menu to select a new root.
 
-`enumerate_files` uses `os.scandir` recursively, validates containment with `pathlib`, skips reparse points and permission errors, and reads metadata only. Original absolute paths remain separate from normalized relative CNN inputs.
+`enumerate_files` uses `os.scandir` recursively, validates each folder with `safe_path` once, checks every entry as it is read, skips reparse points and permission errors, and reads metadata only. It optionally fills a `stats` dict (links, hidden, excluded, unreadable) that the scan summary prints so you can see what was not covered. Exclusions are cheap string-prefix tests rather than a path resolution per entry. Original absolute paths remain separate from normalized relative CNN inputs.
 
 `save_tree` runs Windows `tree.com <root> /F /A` using an argument list and saves its output. File paths come from Python enumeration, never ASCII-tree parsing. Since Windows tree has no reliable no-follow flag, a preliminary safety walk detects links/unreadable entries; those trees use a safe Python hierarchy instead. Non-Windows systems also use that fallback. Keep the test tree stable during scans.
 
@@ -94,7 +97,7 @@ Before selection navigation is unrestricted. After `select`, `Navigator.cd` uses
 
 Stage 1 runs the same `Predictor` checkpoint and encoder over metadata batches. Stage 2 separately requests `INSPECT` before `inspect_candidates` reads only the top K accessible supported files. Declining opens no candidate contents. Disabling `FULL_SCAN_ALLOW_CONTENT_INSPECTION` removes this stage entirely. Paths themselves may reveal sensitive metadata, so handle local reports appropriately.
 
-Progress shows evaluated count and elapsed time. `MAX_FILES_TO_SCAN` bounds a run; Ctrl+C cancels enumeration/inference while retaining completed batches. Paths and CSV rows are written incrementally. SQLite stores scores on disk and streams a final descending CSV; memory does not grow with the complete file list. The console displays the top K; the CSV contains every rank. Inspection traverses sorted candidates lazily and skips failed files until K successful supported inspections.
+Progress is one self-updating line (count, files/s, elapsed) on a terminal and an occasional plain line when piped; the summary then reports files evaluated, how many scored above the decision threshold, and what was skipped. Scores use the validation-tuned threshold saved in the checkpoint (see below). `MAX_FILES_TO_SCAN` bounds a run; Ctrl+C cancels enumeration/inference while retaining completed batches. Paths and CSV rows are written incrementally. SQLite stores scores on disk and streams a final descending CSV; memory does not grow with the complete file list. The console displays the top K; the CSV contains every rank. Inspection traverses sorted candidates lazily and skips failed files until K successful supported inspections.
 
 ## CNN operations and mathematics
 
@@ -132,12 +135,21 @@ Edit **`config.py`**, beneath the highly visible CHANGE ME comments. Every confi
 | `RANDOM_SEED` | 471: reproducibility | Changing changes randomness; no monotonic quality effect |
 | `TRAIN_SPLIT`, `VALIDATION_SPLIT`, `TEST_SPLIT` | 0.70/0.15/0.15 | Trade training data against reliability of held-out evaluation; sum must be 1 |
 | `EXAMPLES_PER_FAMILY` | 12: manageable corpus | More data/time / fewer variants |
-| `PREDICTION_THRESHOLD` | 0.5: conventional binary cutoff | Usually more precision, less recall / converse |
+| `PREDICTION_THRESHOLD` | 0.5: fallback cutoff, used when `AUTO_TUNE_THRESHOLD` is False or the checkpoint has none | Usually more precision, less recall / converse |
+| `AUTO_TUNE_THRESHOLD`, `THRESHOLD_F_BETA` | True, 2.0: cutoff tuned on validation data, favoring recall | Beta higher = fewer missed PII files, more false alarms |
+| `WEIGHT_DECAY` | 0.01: AdamW penalty on large weights | More regularization / none at 0 |
+| `GRADIENT_CLIP` | 1.0: largest gradient norm per update | Lower = steadier / None disables |
+| `BALANCE_CLASSES` | True: rarer label weighted in the loss | False treats all examples equally |
+| `LR_PATIENCE`, `LR_FACTOR` | 3, 0.5: halve the learning rate after 3 flat epochs | Lower factor cuts harder; 1.0 disables |
+| `EARLY_STOPPING_PATIENCE` | 8: stop after 8 epochs without improvement | None trains all epochs |
+| `CHECKPOINT_BY` | "auc": keep the epoch with the best validation ranking | "loss" keeps the lowest validation loss |
+| `AUGMENT_TRAINING_PATHS`, `AUGMENT_PROBABILITY` | True, 0.5: vary paths each epoch | Higher = more variety; False trains on the raw paths |
+| `NUM_THREADS` | 2: CPU threads for training and inference | Faster / heavier on the computer |
 | `TOP_K_FILES` | 10: limited content checks | More content read / fewer checks |
 | `INFERENCE_BATCH_SIZE` | 64: bounded CPU batches | More memory/throughput / more overhead |
 | `MAX_INSPECTION_BYTES` | 262144: bounded reading | More coverage / faster partial checks |
 
-Other centralized controls: `DEFAULT_SCAN_MODE`, `MAX_FILES_TO_SCAN`, `INCLUDE_HIDDEN_FILES`, `SHOW_SCAN_PROGRESS`, `SUPPORTED_EXTENSIONS`, `TEST_DIRECTORY`, `OUTPUT_DIRECTORY`, `DATA_DIRECTORY`, `FULL_SCAN_REQUIRE_CONFIRMATION`, `FULL_SCAN_ALLOW_CONTENT_INSPECTION`, `EXCLUDED_DIRECTORIES`, `FOLLOW_SYMLINKS`. More exclusions reduce coverage. Hidden entries are included by default. None removes the explicit file limit. Links are always disabled; setting True is rejected. Changing extensions alone does not add a parser: update `inspection.py` too. Disabling metadata confirmation is only for deliberate authorized automation; contents still require separate approval.
+Other centralized controls: `DEFAULT_SCAN_MODE`, `MAX_FILES_TO_SCAN`, `INCLUDE_HIDDEN_FILES`, `SHOW_SCAN_PROGRESS`, `SUPPORTED_EXTENSIONS`, `TEST_DIRECTORY`, `OUTPUT_DIRECTORY`, `DATA_DIRECTORY`, `FULL_SCAN_REQUIRE_CONFIRMATION`, `FULL_SCAN_ALLOW_CONTENT_INSPECTION`, `EXCLUDED_DIRECTORIES`, `FOLLOW_SYMLINKS`. More exclusions reduce coverage. Hidden entries are included by default. None removes the explicit file limit. Links are always disabled; setting True is rejected. Inspection can read UTF-8 text formats (`.txt .csv .tsv .log .md .json .xml .ini .cfg .yaml .yml .gitignore`); `SUPPORTED_EXTENSIONS` selects among them, and anything else needs a new reader in `inspection.py`. Disabling metadata confirmation is only for deliberate authorized automation; contents still require separate approval.
 
 One convolution is deliberate. More layers (an edit to `model.py`, with matching saved settings) could combine fragments into longer features, but increase runtime, explanation complexity and overfitting risk. Ensure kernel/stride/padding yield a positive output length when experimenting.
 
@@ -145,9 +157,11 @@ One convolution is deliberate. More layers (an edit to `model.py`, with matching
 
 The generator chooses fictional PII-bearing or benign contents first and records their known truth, never deriving a label from filename keywords or inspection rules. Filenames often correlate with contents but include misleading generic positives and personal/payroll-named negatives. Employee records, personnel docs, contacts, payroll, personal schedules, meeting notes, general documentation, configs and unrelated texts are represented.
 
-It stratifies labels, shuffles template families with the seed, splits whole families, then generates random suffixes *inside* each split. No numbered variant of the same path template crosses splits. Default rounding gives 336 training, 72 validation and 72 test examples. Shared semantic words support transfer; synthetic examples are still correlated and do not establish real-world accuracy.
+It stratifies labels, shuffles template families with the seed, splits whole families, then generates random suffixes *inside* each split. No numbered variant of the same path template crosses splits. The corpus has 52 hand-written families plus 140 reproducible programmatic ones built from word pools (sensitive, neutral and benign folder and file words, with deliberate decoys such as benign `payroll_blank` files and PII-bearing `item`/`data` files). Default rounding gives 1608 training, 336 validation and 360 test examples; the original 40-family corpus had only six validation families, which made checkpoint selection noisy. Shared semantic words support transfer; synthetic examples are still correlated and do not establish real-world accuracy, and decoy families cap the accuracy any path-only model can reach.
 
-Training shuffles batches, computes loss, backpropagates, and updates embedding/convolution/output weights. Validation disables gradients and dropout. Lowest validation loss selects the saved checkpoint; held-out test evaluation happens afterward. The JSON records epoch losses, test precision/recall/F1, seed and maximum convolution-weight change. Precision measures correctness among predicted positives; recall measures positives found; F1 combines them. Zero-denominator cases return zero.
+Each epoch trains on freshly augmented paths (random neutral parent folders, `_`/`-`/space swaps, copy suffixes such as ` (1)` or `_final`, and an occasional typo; labels never change), shuffles batches, computes a class-weighted loss, backpropagates, clips gradients and updates embedding/convolution/output weights with AdamW. The learning rate halves after three flat validation epochs and training stops after eight epochs without improvement (Ctrl+C also stops cleanly and keeps the best epoch). Validation disables gradients and dropout. The epoch with the best validation **ROC AUC** (ranking quality, which is what scans use; loss breaks ties) is saved; `CHECKPOINT_BY = "loss"` restores loss-based selection. The decision threshold is then tuned on validation data only (F-beta with beta 2, the median of tied cutoffs) and saved inside `model.pt`; the held-out test set is evaluated once at the end. The JSON records per-epoch loss, AUC, F1 and learning rate, test precision/recall/F1/AUC/accuracy/confusion counts, the threshold, an all-positive baseline, seed and maximum convolution-weight change. Precision measures correctness among predicted positives; recall measures positives found; F1 combines them. Zero-denominator cases return zero.
+
+Two built-in checks cover the points below. `python train.py --control` retrains the same CNN on shuffled labels (saving nothing) and compares test AUC with the real run; `python train.py --seeds 5` repeats training over consecutive seeds on the same data and reports mean, standard deviation and range. Other options: `--epochs N`, `--seed S`.
 
 To check learning rather than memorization:
 
@@ -159,7 +173,7 @@ To check learning rather than memorization:
 
 ## Verification behavior and limitations
 
-`inspection.inspect_file` revalidates containment before reading at most the byte cap. Text checks email, phone, SSN-like and clearly labeled name patterns. CSV uses `csv.DictReader`, pattern checks on text values and supported nonempty name columns. `.gitignore` reports sensitive filename/directory **metadata clues**, not proof of PII. Unsupported files are ranked but never opened for inspection. The console prints categories/yes-no results, never matched values.
+`inspection.inspect_file` revalidates containment before reading at most the byte cap. Text checks email, phone, SSN-like, labeled name, labeled date-of-birth and street-address patterns, plus credit-card numbers that pass the Luhn checksum. CSV/TSV uses `csv.DictReader`: non-empty cells under recognizable column headers (`email`, `phone`, `ssn`, `dob`, `address`, `card_number`, name columns ...) count too, without double counting a value the patterns already found. Each file gets a plain-language severity: High (an SSN-like or card number, or three or more categories), Medium (two), Low (one). `.gitignore` reports sensitive filename/directory **metadata clues**, not proof of PII. Unsupported files are ranked but never opened for inspection. The console prints categories with occurrence counts, never matched values, and `outputs/inspection_report.csv` saves the same counts per file as a review list. Nothing is ever deleted by this program: review the list and remove files yourself.
 
 Statuses distinguish detected indicators, no supported indicators, unsupported inspection and failed inspection. Truncation is reported. No indicators **does not prove absence of PII**. Rules have false positives/negatives, SSN-like strings are not verified identities, and UTF-8 replacement can miss other encodings. Physical addresses, detailed schedules, PDF/Office/binary parsing are future extensions.
 
@@ -173,6 +187,6 @@ Suggested Lesson 41 extensions (confirm against your course rubric): larger inde
 
 ## Verification in the development environment
 
-The complete synthetic demo ran on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The default seed produced test precision 1.0000, recall 0.9722 and F1 0.9859. Convolution weights changed by up to 0.322566. Validation selected epoch 2 (loss about 0.6989); subsequent training loss fell while validation loss rose. This is **overfitting evidence**, despite the favorable small test score, and motivates a larger independent validation corpus for Lesson 41. The training script explicitly reports this and retains the early checkpoint.
+The original synthetic demo was run on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The training, inspection, scanner and terminal changes described above were developed and tested on Linux (Python 3.13, PyTorch 2.15.0 from PyPI): all 28 `unittest` tests pass with two Windows-only tests skipped (junction boundary and fixed-drive discovery), and the scripted menu and navigator sessions ran correctly. **They have not been re-run on Windows**, so `tree.com`, junctions, `run.bat` and the Windows console's color handling need a quick check on your machine.
 
-The synthetic demo verified Windows `tree /F /A`, ranking and limited inspection in both pipelines. Automated tests include native Windows junction restrictions, fixed-drive API filtering with mocked drive types, approval gates, unsupported-file handling and original-path reporting. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings. Existing environments are checked and repaired by the launcher on the next run.
+Default-seed results on the current synthetic corpus (held-out test, 360 paths): precision 0.737, recall 0.933, F1 0.824, ROC AUC 0.880 at a validation-tuned threshold of 0.48; the all-positive baseline F1 is 0.667. Five consecutive seeds gave F1 0.800 +/- 0.035 (range 0.735-0.827) and AUC 0.871 +/- 0.028. The shuffled-label control scored AUC 0.52 against 0.88 for real labels, so the CNN is learning from the labels rather than memorizing. The remaining errors are mostly decoy families (benign files with sensitive-sounding names), which no path-only model can separate; this is why verification reads the contents of the top files. Scores here are on synthetic data and do not establish real-world accuracy. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings.
