@@ -15,6 +15,8 @@ def main():
     candidates = scan([config.TEST_DIRECTORY], full=True, predictor=predictor)
     print("Demo explicitly approves synthetic content inspection.")
     print_inspections(candidates, approved=True)
+    from report import write_html_report
+    print("\nHTML report:", write_html_report(full=True))
 
 
 if __name__ == "__main__":

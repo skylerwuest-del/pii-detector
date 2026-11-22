@@ -112,7 +112,13 @@ def common_places():
 
 
 def enumerate_files(root, excluded=(), stats=None):
-    """Yield metadata only, without reading contents or following links.
+    """Yield (path, root) for every regular file; see enumerate_entries."""
+    for path, boundary, _, _ in enumerate_entries(root, excluded, stats):
+        yield path, boundary
+
+
+def enumerate_entries(root, excluded=(), stats=None):
+    """Yield (path, root, size, mtime) metadata only, without reading contents or following links.
 
     `stats` (optional dict) counts what was skipped so the UI can explain coverage.
     Each folder is validated once with safe_path; entries are checked as they are read.
@@ -157,7 +163,7 @@ def enumerate_files(root, excluded=(), stats=None):
                         if entry.is_dir(follow_symlinks=False):
                             stack.append(path)
                         elif stat.S_ISREG(info.st_mode):
-                            yield path, root
+                            yield path, root, info.st_size, info.st_mtime
                     except (OSError, ValueError):
                         count("unreadable")
                         continue

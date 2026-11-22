@@ -35,6 +35,12 @@ AUGMENT_TRAINING_PATHS = True  # True varies training paths every epoch (folders
 AUGMENT_PROBABILITY = 0.5  # Chance of each path variation; higher = more variety, lower stays closer to the data.
 AUTO_TUNE_THRESHOLD = True  # True saves a validation-tuned cutoff with the checkpoint; False always uses PREDICTION_THRESHOLD.
 THRESHOLD_F_BETA = 2.0  # Tuning weight: 2 favors recall (missing PII costs more), 1 balances, 0.5 favors precision.
+USE_METADATA_FEATURES = False  # True adds file size, depth and type group as extra CNN inputs; most useful with feedback labels.
+STRIP_ACCENTS = True  # True folds accents (nomina = nómina) before encoding; saved with the checkpoint.
+CALIBRATE_SCORES = True  # True fits a temperature on validation so scores behave more like probabilities.
+USE_FEEDBACK = True  # True adds your review decisions (data/feedback.json) to the training split.
+FEEDBACK_REPEAT = 3  # Copies of each feedback example per epoch; higher trusts your labels more.
+SWEEP_GRID = {"NUM_FILTERS": [16, 32, 64], "KERNEL_SIZE": [3, 5, 7], "DROPOUT_RATE": [0.2, 0.4]}  # train.py --sweep
 NUM_THREADS = 2  # CPU threads for training and inference; higher is faster but uses more of the computer.
 EXAMPLES_PER_FAMILY = 12  # Synthetic variants per family; higher grows data/time, lower reduces diversity.
 PROJECT_DIRECTORY = Path(__file__).resolve().parent  # Project anchor; changing moves default artifacts.
@@ -52,8 +58,37 @@ MAX_FILES_TO_SCAN = None  # Metadata limit; higher scans more; None removes the 
 INCLUDE_HIDDEN_FILES = True  # True includes hidden entries; False reduces coverage.
 SHOW_SCAN_PROGRESS = True  # True prints counters/time; False produces quieter output.
 INFERENCE_BATCH_SIZE = 64  # Paths per inference; higher uses more memory, lower has more overhead.
-SUPPORTED_EXTENSIONS = [".txt", ".csv", ".tsv", ".log", ".md", ".json", ".xml", ".ini", ".cfg", ".yaml", ".yml", ".gitignore"]  # Inspected formats; each must also be readable as text in inspection.py.
+SUPPORTED_EXTENSIONS = [".txt", ".csv", ".tsv", ".log", ".md", ".json", ".xml", ".ini", ".cfg", ".yaml", ".yml", ".gitignore",
+                        ".ics", ".vcf", ".eml", ".docx", ".xlsx", ".pptx", ".pdf", ".zip"]  # Inspected formats; .pdf also needs pypdf installed.
 FULL_SCAN_REQUIRE_CONFIRMATION = True  # True requests broad-scan approval; False skips that prompt for authorized automation.
 FULL_SCAN_ALLOW_CONTENT_INSPECTION = True  # True allows a separate approval prompt; False disables broad content inspection.
 EXCLUDED_DIRECTORIES = []  # Additional absolute directory exclusions; more exclusions reduce coverage.
+REUSE_UNCHANGED_SCORES = True  # True reuses saved scores for files whose size and time are unchanged (fast rescans and resume).
+QUARANTINE_DIRECTORY = OUTPUT_DIRECTORY / "quarantine"  # Review "quarantine" moves files here; restore puts them back.
+RESULTS_PAGE_SIZE = 20  # Rows per page for the results / next commands.
 FOLLOW_SYMLINKS = False  # Safety invariant: links/junctions are always skipped; True is rejected.
+
+
+# ================================================
+# SAVED SETTINGS FROM THE MENU (main.py option 5)
+# ================================================
+# The Settings menu writes a few scan options to user_settings.json beside this file.
+# They override the values above. Delete that file to return to these defaults.
+USER_SETTINGS_FILE = PROJECT_DIRECTORY / "user_settings.json"
+USER_SETTABLE = ("TOP_K_FILES", "MAX_FILES_TO_SCAN", "INCLUDE_HIDDEN_FILES", "SHOW_SCAN_PROGRESS",
+                 "PREDICTION_THRESHOLD", "AUTO_TUNE_THRESHOLD", "MAX_INSPECTION_BYTES", "REUSE_UNCHANGED_SCORES")
+
+
+def load_user_settings():
+    import json
+    try:
+        saved = json.loads(USER_SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    applied = {k: v for k, v in saved.items() if k in USER_SETTABLE}
+    globals().update(applied)
+    return applied
+
+
+DEFAULTS = {name: globals()[name] for name in USER_SETTABLE}  # Values before saved settings apply.
+load_user_settings()

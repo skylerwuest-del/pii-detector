@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import random
+import re
 import statistics
 import time
 import torch
@@ -17,7 +18,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import config
 import ui
 from model import PathCNN, model_settings
-from preprocessing import PathEncoder
+from preprocessing import PathEncoder, metadata_features
+from generate_data import build_families
 
 # Neutral parent folders and file-name habits seen on real computers. They carry no label,
 # so adding them teaches the CNN to ignore context and focus on the informative fragments.
@@ -93,22 +95,76 @@ def tune_threshold(labels, scores, beta):
     return float(statistics.median(tied)), best
 
 
-def predict_scores(model, x, batch_size):
+def predict_logits(model, x, extra, batch_size):
     model.eval()
-    scores = []
+    logits = []
     with torch.no_grad():
         for start in range(0, len(x), batch_size):
-            scores.extend(torch.sigmoid(model(x[start:start + batch_size])).tolist())
-    return scores
+            batch_extra = extra[start:start + batch_size] if extra is not None else None
+            logits.append(model(x[start:start + batch_size], batch_extra))
+    return torch.cat(logits) if logits else torch.zeros(0)
 
 
-def mean_loss(model, x, y, loss_function, batch_size):
-    model.eval()
-    total = 0.0
-    with torch.no_grad():
-        for start in range(0, len(x), batch_size):
-            total += loss_function(model(x[start:start + batch_size]), y[start:start + batch_size]).item() * len(y[start:start + batch_size])
-    return total / max(1, len(x))
+def predict_scores(model, x, batch_size, extra=None, temperature=1.0):
+    return torch.sigmoid(predict_logits(model, x, extra, batch_size) / temperature).tolist()
+
+
+def mean_loss(model, x, y, loss_function, batch_size, extra=None):
+    return loss_function(predict_logits(model, x, extra, batch_size), y).item() if len(x) else 0.0
+
+
+def fit_temperature(logits, labels):
+    """One scalar T so sigmoid(logit / T) matches validation frequencies (temperature scaling).
+
+    T > 1 softens over-confident scores. Ranking, and therefore AUC, is unchanged.
+    Only T >= 1 is allowed: a nearly separable validation set always "asks" for sharper
+    scores, which then over-state confidence on harder unseen paths.
+    """
+    y = torch.tensor(labels, dtype=torch.float32)
+    loss = nn.BCEWithLogitsLoss()
+    candidates = [1.1 ** i for i in range(50)]  # 1 .. ~107, geometric grid.
+    return min(candidates, key=lambda t: loss(logits / t, y).item())
+
+
+def calibration_error(labels, scores, bins=10):
+    """Expected calibration error and per-bin (count, mean score, positive rate)."""
+    table = []
+    total_error = 0.0
+    for b in range(bins):
+        low, high = b / bins, (b + 1) / bins
+        members = [(y, s) for y, s in zip(labels, scores) if low <= s < high or (b == bins - 1 and s == 1.0)]
+        if members:
+            mean_score = sum(s for _, s in members) / len(members)
+            positive_rate = sum(y for y, _ in members) / len(members)
+            total_error += len(members) / max(1, len(labels)) * abs(mean_score - positive_rate)
+            table.append(dict(bin=f"{low:.1f}-{high:.1f}", count=len(members), mean_score=mean_score, positive_rate=positive_rate))
+    return total_error, table
+
+
+TOKEN_SPLIT = re.compile(r"[/_\-. ()\d]+")
+
+
+def error_analysis(records, labels, predictions, family_names):
+    """Which families and words the test mistakes come from (helps decide what data to add)."""
+    by_family, tokens = {}, {"false_alarm": {}, "missed": {}}
+    for record, y, p in zip(records, labels, predictions):
+        if y == p:
+            continue
+        kind = "false_alarm" if p else "missed"
+        name = family_names.get(record.get("family"), str(record.get("family")))
+        entry = by_family.setdefault(name, dict(family=name, label=y, false_alarms=0, missed=0, examples=0))
+        entry["false_alarms" if p else "missed"] += 1
+        for token in {t for t in TOKEN_SPLIT.split(record["path"].lower()) if len(t) > 2 and t not in ("txt", "csv", "tsv", "log", "json", "md")}:
+            tokens[kind][token] = tokens[kind].get(token, 0) + 1
+    totals = {}
+    for record in records:
+        name = family_names.get(record.get("family"), str(record.get("family")))
+        totals[name] = totals.get(name, 0) + 1
+    for name, entry in by_family.items():
+        entry["examples"] = totals.get(name, 0)
+    families = sorted(by_family.values(), key=lambda e: -(e["false_alarms"] + e["missed"]))
+    top = lambda d: sorted(d.items(), key=lambda kv: -kv[1])[:10]
+    return dict(families=families, false_alarm_words=top(tokens["false_alarm"]), missed_words=top(tokens["missed"]))
 
 
 def load_dataset():
@@ -118,6 +174,16 @@ def load_dataset():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def feedback_records():
+    """Your review decisions as extra training examples (never validation/test, which stay synthetic)."""
+    if not config.USE_FEEDBACK:
+        return []
+    from review import load_feedback
+    entries = [dict(path=e["path"], label=int(e["label"]), size=e.get("size") or 0, family="feedback")
+               for e in load_feedback() if e.get("path")]
+    return entries * max(1, config.FEEDBACK_REPEAT)
+
+
 def run_training(seed, epochs, checkpoint=None, shuffle_labels=False, quiet=False, data=None):
     """Train one CNN. Returns a results dict; saves weights only when `checkpoint` is given."""
     random.seed(seed)
@@ -125,16 +191,25 @@ def run_training(seed, epochs, checkpoint=None, shuffle_labels=False, quiet=Fals
     torch.set_num_threads(config.NUM_THREADS)
     rng = random.Random(seed)
     data = data or load_dataset()
-    encoder = PathEncoder()
+    encoder = PathEncoder(strip_accents=config.STRIP_ACCENTS)
+    settings = model_settings()
+    use_metadata = settings["num_extra_features"] > 0
     encode = lambda paths: torch.tensor([encoder.encode(p) for p in paths], dtype=torch.long)
-    labels = {split: [r["label"] for r in records] for split, records in data.items()}
-    train_labels = list(labels["train"])
+    def extras(records, paths=None):
+        if not use_metadata:
+            return None
+        paths = paths or [r["path"] for r in records]
+        return torch.tensor([metadata_features(p, r.get("size", 0)) for p, r in zip(paths, records)], dtype=torch.float32)
+    feedback = feedback_records()
+    train_records = list(data["train"]) + feedback
+    labels = {split: [r["label"] for r in data[split]] for split in ("validation", "test")}
+    train_labels = [r["label"] for r in train_records]
     if shuffle_labels:  # Control run: a model that learns from labels must fail on shuffled ones.
         rng.shuffle(train_labels)
     y_train = torch.tensor(train_labels, dtype=torch.float32)
     x = {s: encode([r["path"] for r in data[s]]) for s in ("validation", "test")}
+    extra = {s: extras(data[s]) for s in ("validation", "test")}
     y = {s: torch.tensor(labels[s], dtype=torch.float32) for s in ("validation", "test")}
-    settings = model_settings()
     model = PathCNN(**settings)
     initial = model.conv.weight.detach().clone()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY)
@@ -145,32 +220,37 @@ def run_training(seed, epochs, checkpoint=None, shuffle_labels=False, quiet=Fals
     # Binary cross-entropy penalizes wrong binary predictions; logits version is numerically stable.
     loss_function = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     best_loss, best_epoch, best_state, stale = float("inf"), 0, None, 0
-    best_key = None  # Tuple compared as "larger is better"; see checkpoint_key below.
+    best_key, best_auc = None, float("nan")  # Keys compare as "larger is better".
     by_auc = config.CHECKPOINT_BY == "auc"
     history, started, stopped_early = [], time.monotonic(), False
     if not quiet:
-        ui.info(f"Training on {len(train_labels)} paths ({positives} positive), validating on {len(labels['validation'])}, "
-                f"testing on {len(labels['test'])}; seed {seed}"
-                + (" [SHUFFLED-LABEL CONTROL]" if shuffle_labels else ""))
+        ui.info(f"Training on {len(train_labels)} paths ({positives} positive"
+                + (f", incl. {len(feedback)} from your feedback" if feedback else "")
+                + f"), validating on {len(labels['validation'])}, testing on {len(labels['test'])}; seed {seed}"
+                + (" [SHUFFLED-LABEL CONTROL]" if shuffle_labels else "")
+                + (" [+ metadata features]" if use_metadata else ""))
         print(ui.style(f"{'epoch':>5}  {'':22}  {'train':>7}  {'valid':>7}  {'val AUC':>7}  {'val F1':>6}  {'lr':>8}", "bold"))
     try:
         for epoch in range(1, epochs + 1):
-            paths = [r["path"] for r in data["train"]]
+            paths = [r["path"] for r in train_records]
             if config.AUGMENT_TRAINING_PATHS:
                 paths = [augment_path(p, rng) for p in paths]
-            loader = DataLoader(TensorDataset(encode(paths), y_train), batch_size=config.BATCH_SIZE, shuffle=True)
+            train_extra = extras(train_records, paths)
+            tensors = (encode(paths), train_extra, y_train) if use_metadata else (encode(paths), y_train)
+            loader = DataLoader(TensorDataset(*tensors), batch_size=config.BATCH_SIZE, shuffle=True)
             model.train()
             total = 0.0
-            for batch_x, batch_y in loader:
-                loss = loss_function(model(batch_x), batch_y)
+            for batch in loader:
+                batch_x, batch_y = batch[0], batch[-1]
+                loss = loss_function(model(batch_x, batch[1] if use_metadata else None), batch_y)
                 optimizer.zero_grad()
                 loss.backward()  # Chain rule computes derivatives through CNN operations.
                 if config.GRADIENT_CLIP:
                     nn.utils.clip_grad_norm_(model.parameters(), config.GRADIENT_CLIP)
                 optimizer.step()  # Update embedding, convolution and output weights.
                 total += loss.item() * len(batch_y)
-            validation_loss = mean_loss(model, x["validation"], y["validation"], loss_function, config.BATCH_SIZE)
-            epoch_scores = predict_scores(model, x["validation"], config.BATCH_SIZE)
+            validation_loss = mean_loss(model, x["validation"], y["validation"], loss_function, config.BATCH_SIZE, extra["validation"])
+            epoch_scores = predict_scores(model, x["validation"], config.BATCH_SIZE, extra["validation"])
             validation_f1 = metrics(labels["validation"], [int(s >= 0.5) for s in epoch_scores])["f1"]
             validation_auc = roc_auc(labels["validation"], epoch_scores)
             learning_rate = optimizer.param_groups[0]["lr"]
@@ -183,7 +263,7 @@ def run_training(seed, epochs, checkpoint=None, shuffle_labels=False, quiet=Fals
             key = (round(validation_auc, 3), -validation_loss) if by_auc else (-validation_loss,)
             improved = best_key is None or key > best_key
             if improved:
-                best_key, best_loss, best_epoch, stale = key, validation_loss, epoch, 0
+                best_key, best_loss, best_auc, best_epoch, stale = key, validation_loss, validation_auc, epoch, 0
                 best_state = copy.deepcopy(model.state_dict())
             else:
                 stale += 1
@@ -203,26 +283,36 @@ def run_training(seed, epochs, checkpoint=None, shuffle_labels=False, quiet=Fals
         raise RuntimeError("Training stopped before any epoch finished")
     model.load_state_dict(best_state)
     weight_change = (initial - model.conv.weight.detach()).abs().max().item()
-    # Threshold is chosen on validation data only; the test set is touched exactly once.
-    validation_scores = predict_scores(model, x["validation"], config.BATCH_SIZE)
+    # Calibration and threshold use validation data only; the test set is touched exactly once.
+    validation_logits = predict_logits(model, x["validation"], extra["validation"], config.BATCH_SIZE)
+    temperature = fit_temperature(validation_logits, labels["validation"]) if config.CALIBRATE_SCORES else 1.0
+    validation_scores = torch.sigmoid(validation_logits / temperature).tolist()
     tuned, tuned_score = tune_threshold(labels["validation"], validation_scores, config.THRESHOLD_F_BETA)
     threshold = tuned if config.AUTO_TUNE_THRESHOLD else config.PREDICTION_THRESHOLD
-    test_scores = predict_scores(model, x["test"], config.BATCH_SIZE)
-    results = metrics(labels["test"], [int(s >= threshold) for s in test_scores])
+    test_logits = predict_logits(model, x["test"], extra["test"], config.BATCH_SIZE)
+    test_scores = torch.sigmoid(test_logits / temperature).tolist()
+    test_predictions = [int(s >= threshold) for s in test_scores]
+    results = metrics(labels["test"], test_predictions)
     at_default = metrics(labels["test"], [int(s >= 0.5) for s in test_scores])
     test_positive_rate = sum(labels["test"]) / max(1, len(labels["test"]))
-    results.update(auc=roc_auc(labels["test"], test_scores), threshold=threshold,
+    uncalibrated_ece, _ = calibration_error(labels["test"], torch.sigmoid(test_logits).tolist())
+    ece, reliability = calibration_error(labels["test"], test_scores)
+    family_names = {i: template for i, (template, _) in enumerate(build_families())}
+    results.update(auc=roc_auc(labels["test"], test_scores), threshold=threshold, temperature=temperature,
+                   calibration_error=ece, uncalibrated_calibration_error=uncalibrated_ece, reliability=reliability,
+                   errors=error_analysis(data["test"], labels["test"], test_predictions, family_names),
                    f1_at_0_5=at_default["f1"], tuned_validation_fbeta=tuned_score,
-                   test_loss=mean_loss(model, x["test"], y["test"], loss_function, config.BATCH_SIZE),
+                   test_loss=mean_loss(model, x["test"], y["test"], loss_function, config.BATCH_SIZE, extra["test"]),
                    baseline_all_positive_f1=2 * test_positive_rate / (1 + test_positive_rate) if test_positive_rate else 0.0,
                    max_conv_weight_change=weight_change, history=history, test_examples=len(labels["test"]),
-                   seed=seed, best_epoch=best_epoch, best_validation_loss=best_loss,
+                   seed=seed, best_epoch=best_epoch, best_validation_loss=best_loss, best_validation_auc=best_auc,
                    epochs_run=len(history), stopped_early=stopped_early, shuffled_labels=shuffle_labels,
+                   feedback_examples=len(feedback) // max(1, config.FEEDBACK_REPEAT), metadata_features=use_metadata,
                    seconds=time.monotonic() - started)
     if checkpoint:
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(dict(state_dict=model.state_dict(), model_settings=settings,
-                        encoder=encoder.settings(), threshold=float(threshold)), checkpoint)
+        torch.save(dict(state_dict=model.state_dict(), model_settings=settings, encoder=encoder.settings(),
+                        threshold=float(threshold), temperature=float(temperature)), checkpoint)
     return results
 
 
@@ -244,9 +334,30 @@ def report(results):
           f"false alarms {c['fp']}  correct skips {c['tn']}")
     print(f"Selected epoch {results['best_epoch']} of {results['epochs_run']} run (by validation {config.CHECKPOINT_BY}), validation loss {results['best_validation_loss']:.4f}; "
           f"maximum convolution weight change {results['max_conv_weight_change']:.6f}; {ui.human_time(results['seconds'])}")
+    if results.get("feedback_examples"):
+        print(f"Included {results['feedback_examples']} feedback label(s) from your reviews in training.")
     last = results["history"][-1]
     if last["validation"] > min(h["validation"] for h in results["history"]) * 1.1:
         ui.warn("Validation loss worsened after the best epoch: evidence of overfitting. The best earlier checkpoint was retained.")
+    if "reliability" in results:
+        ui.heading("Calibration (test)")
+        print(f"Temperature {results['temperature']:.2f} fitted on validation. Expected calibration error "
+              f"{results['uncalibrated_calibration_error']:.3f} before -> {results['calibration_error']:.3f} after "
+              "(0 = a score of 0.8 means PII 80% of the time).")
+        ui.table(["Score bin", "Paths", "Mean score", "Actually PII", ""],
+                 [[r["bin"], r["count"], f"{r['mean_score']:.2f}", f"{r['positive_rate']:.2f}", ui.bar(r["positive_rate"], 10)]
+                  for r in results["reliability"]], aligns=["<", ">", ">", ">", "<"])
+    errors = results.get("errors")
+    if errors and errors["families"]:
+        ui.heading("Where the test mistakes come from")
+        ui.table(["Path family", "True label", "False alarms", "Missed", "Family size"],
+                 [[ui.shorten(f["family"], 44), "PII" if f["label"] else "benign", f["false_alarms"], f["missed"], f["examples"]]
+                  for f in errors["families"][:8]], aligns=["<", "<", ">", ">", ">"])
+        if errors["false_alarm_words"]:
+            print("Words in false alarms: " + ", ".join(f"{w} ({n})" for w, n in errors["false_alarm_words"][:8]))
+        if errors["missed_words"]:
+            print("Words in missed PII:   " + ", ".join(f"{w} ({n})" for w, n in errors["missed_words"][:8]))
+        print("Add training families that separate these words by content to reduce such mistakes.")
 
 
 def train(epochs=None, seed=None):
@@ -294,14 +405,55 @@ def seed_study(count, epochs=None):
     return runs
 
 
+def sweep(epochs=None, grid=None):
+    """Try every combination in SWEEP_GRID; choose by VALIDATION ranking, never by test scores."""
+    import itertools
+    grid = grid or config.SWEEP_GRID
+    names = list(grid)
+    combos = list(itertools.product(*(grid[n] for n in names)))
+    ui.heading(f"Hyperparameter sweep ({len(combos)} runs)")
+    data = load_dataset()
+    original = {n: getattr(config, n) for n in names}
+    runs = []
+    try:
+        for index, values in enumerate(combos, 1):
+            for name, value in zip(names, values):
+                setattr(config, name, value)
+            if (config.MAX_PATH_LENGTH + 2 * config.PADDING - config.KERNEL_SIZE) // config.STRIDE + 1 < 1:
+                continue  # This combination leaves no convolution output positions.
+            r = run_training(config.RANDOM_SEED, epochs or config.EPOCHS, quiet=True, data=data)
+            runs.append(dict(settings=dict(zip(names, values)), validation_auc=r["best_validation_auc"],
+                             validation_loss=r["best_validation_loss"], test_f1=r["f1"], test_auc=r["auc"]))
+            print(f"  {index:>2}/{len(combos)}  " + "  ".join(f"{n}={v}" for n, v in zip(names, values))
+                  + f"  ->  val AUC {r['best_validation_auc']:.3f}  val loss {r['best_validation_loss']:.4f}", flush=True)
+    finally:
+        for name, value in original.items():
+            setattr(config, name, value)
+    runs.sort(key=lambda r: (-round(r["validation_auc"], 3), r["validation_loss"]))
+    print()
+    ui.table(names + ["Val AUC", "Val loss"],
+             [[r["settings"][n] for n in names] + [f"{r['validation_auc']:.3f}", f"{r['validation_loss']:.4f}"] for r in runs[:10]],
+             aligns=[">"] * (len(names) + 2))
+    best = runs[0]
+    ui.ok("Best on validation: " + ", ".join(f"{n} = {v}" for n, v in best["settings"].items())
+          + f"  (its test F1 {best['test_f1']:.3f}, AUC {best['test_auc']:.3f}, reported once for reference)")
+    print("To use it, set these values in config.py and retrain. Picking by test scores would overstate accuracy.")
+    (config.OUTPUT_DIRECTORY / "sweep.json").write_text(json.dumps(runs, indent=2), encoding="utf-8")
+    return runs
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the path CNN (defaults come from config.py)")
     parser.add_argument("--epochs", type=int, help="override EPOCHS")
     parser.add_argument("--seed", type=int, help="override RANDOM_SEED for this run")
     parser.add_argument("--seeds", type=int, metavar="N", help="repeat N seeds on the same data; saves nothing")
     parser.add_argument("--control", action="store_true", help="shuffled-label control; saves nothing")
+    parser.add_argument("--sweep", action="store_true", help="try SWEEP_GRID settings, pick by validation; saves nothing")
     args = parser.parse_args()
-    if args.seeds:
+    config.OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    if args.sweep:
+        sweep(args.epochs)
+    elif args.seeds:
         seed_study(args.seeds, args.epochs)
     elif args.control:
         control(args.epochs)

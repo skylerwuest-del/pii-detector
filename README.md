@@ -8,7 +8,7 @@ Use generated synthetic files for demonstrations. Other directories and computer
 
 For the quickest start, install 64-bit Python 3.11 or newer, then double-click **`run.bat`** (or run `.\run.bat` from PowerShell). The launcher works from any working directory. Choose **1** for a controlled directory scan or **2** for a full computer scan. On first use it creates `.venv`, installs CPU dependencies (internet required), and generates synthetic training data and trains if no checkpoint exists. Later scans reuse the saved checkpoint. Full scans keep the existing `SCAN` and `INSPECT` approval prompts.
 
-The launcher also offers **3** to regenerate synthetic data and retrain (replaces the saved checkpoint), **4** for the complete synthetic demo (also regenerates data and retrains), **5** to open `config.py` in Notepad, **6** to install or repair dependencies, and **0** to exit. Edit variables directly in `config.py`; use option 3 after changing model, encoder, or training settings. Inside Python (`python main.py`) the menu offers the same scans plus **3** train/retrain, **4** model details (held-out precision/recall/F1/AUC, saved threshold) and **0** exit; choosing a scan without a trained model offers to train first. Returning with `back` from mode 1 returns to the launcher menu; `exit` also ends that mode and returns to the launcher. A failed operation shows its error and returns to the menu.
+The launcher also offers **3** to regenerate synthetic data and retrain (replaces the saved checkpoint), **4** for the complete synthetic demo (also regenerates data and retrains), **5** to open `config.py` in Notepad, **6** to install or repair dependencies (including optional PDF support), **7** to review flagged files, **8** to open the last HTML report, **9** for the full Python menu, and **0** to exit. Edit variables directly in `config.py`; use option 3 after changing model, encoder, or training settings. Inside Python (`python main.py`) the menu offers the same scans plus **3** train/retrain, **4** model details (held-out precision/recall/F1/AUC, threshold, calibration, feedback labels used), **5** review flagged files, **6** restore from quarantine, **7** settings and **0** exit; choosing a scan without a trained model offers to train first. `python main.py <command>` runs the same features without menus (see *Command line*). Returning with `back` from mode 1 returns to the launcher menu; `exit` also ends that mode and returns to the launcher. A failed operation shows its error and returns to the menu.
 
 Manual installation is also available:
 
@@ -18,11 +18,12 @@ Install 64-bit Python 3.11 or newer with a compatible PyTorch CPU wheel. In Powe
 python -m venv .venv
 .\.venv\Scripts\python -m pip install "torch>=2.9,<3" --index-url https://download.pytorch.org/whl/cpu
 .\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -m pip install -r requirements-optional.txt
 .\.venv\Scripts\python demo.py
 .\.venv\Scripts\python -m unittest discover -s tests -v
 ```
 
-Activation is optional; these commands avoid activation-policy changes. To activate: `.\.venv\Scripts\Activate.ps1`. PyTorch and NumPy are the direct third-party dependencies. NumPy enables PyTorch interoperability without startup warnings. Tests use standard-library `unittest`. Dependency installation requires network access once; the application runs offline.
+Activation is optional; these commands avoid activation-policy changes. To activate: `.\.venv\Scripts\Activate.ps1`. PyTorch and NumPy are the direct third-party dependencies; `pypdf` (in `requirements-optional.txt`) is optional and only enables PDF text checks. Without it PDFs are still ranked, just not opened. NumPy enables PyTorch interoperability without startup warnings. Tests use standard-library `unittest`. Dependency installation requires network access once; the application runs offline.
 
 The demo generates fictional data, trains with per-epoch losses, evaluates held-out data, saves the best validation checkpoint, ranks the synthetic tree, and inspects supported files. It then exercises the full-mode pipeline on the **same synthetic directory with the same predictor instance**, explicitly approving synthetic inspection. It never discovers or scans real drives.
 
@@ -48,10 +49,16 @@ train.py            CPU backpropagation, checkpoint selection, test metrics
 scanner.py          Navigator, root validation, safe enumeration, tree, drive discovery
 inference.py        Shared Predictor, batches, disk-backed ranking, reports
 inspection.py       Limited text/CSV readers and deterministic verification
-main.py             Menu, navigator shell and explicit approval prompts
+main.py             Menu, navigator shell, settings, command line and explicit approval prompts
+review.py           Review flagged files: open, keep, dismiss, quarantine, Recycle Bin; feedback labels
+report.py           Self-contained HTML report (counts and paths, never matched values)
 ui.py               Stdlib-only terminal helpers: color (auto-off when piped), tables, progress, loss chart
 demo.py             Complete synthetic-only demonstration
-tests/              Encoder, CNN, boundary, reporting, inspection, training-method and UI tests
+tests/              Encoder, CNN, boundary, readers, scan engine, review, training, UI and CLI tests
+.github/workflows/  CI: tests, synthetic demo and CLI on Windows and Linux for every push
+requirements-optional.txt   pypdf for PDF inspection
+user_settings.json  Scan options saved from the Settings menu (git-ignored; delete to reset)
+data/feedback.json  Your review decisions, used as extra training labels (stays local)
 data/dataset.json   Path, label, template-family ID and split
 data/corpus/        Synthetic contents corresponding to the manifest
 synthetic_demo/     Small authorized example tree
@@ -64,14 +71,18 @@ outputs/inspection_report.csv   Per-file verdicts, severity and indicator COUNTS
 outputs/seed_study.json         Written by `train.py --seeds N`
 outputs/full_scan_file_paths.txt  Incremental full-mode absolute paths
 outputs/full_scan_results.csv     Full-mode descending scores and ranks
-outputs/*ranking.sqlite3          Disk-backed ranking databases
+outputs/*ranking.sqlite3          Disk-backed ranking databases (results + scan metadata)
+outputs/scan_history.sqlite3      Size, modified time and score per file across scans (reuse, change tracking)
+outputs/*report.html              HTML report of the last scan
+outputs/quarantine/               Files moved by review, with manifest.json for restore
+outputs/sweep.json                Written by `train.py --sweep`
 ```
 
 The small demo includes employees CSV, schedule text, meeting notes, config text, `.gitignore`, an unsupported file, misleading `personal_notes.txt` without PII, and generic `item.txt` with fictional PII. All examples use fictional names, reserved example email domains, example phone numbers and SSN-like strings. Never replace them with real personal data for class exercises.
 
 ## Mode 1: controlled directory navigator
 
-The menu starts `Navigator` in your home directory. Commands: `ls` (folders first, sizes), `cd <directory>`, `cd ..`, `cd ~`, `cd -` (previous folder), `pwd`, `tree [depth]`, `places` (Documents, Downloads, Desktop ...), `select`, `scan`, `help`, `back`, `exit`. Tab completes commands and sub-folders where Python's `readline` exists (not on stock Windows). Links are listed but never entered. The prompt turns green with `[root locked]` after `select`. Spaces are accepted directly or with double quotes. These are safe Python operations, never arbitrary shell commands.
+The menu starts `Navigator` in your home directory. Commands: `ls` (folders first, sizes), `cd <directory>`, `cd ..`, `cd ~`, `cd -` (previous folder), `pwd`, `tree [depth]`, `places` (Documents, Downloads, Desktop ...), `select`, `scan`, `results [--high] [--ext csv] [--folder Documents] [--changed]`, `next` / `prev` (pages), `folders [depth]` (riskiest folders), `inspect` (verify the top files again), `review [--all]`, `restore`, `report` (HTML, opens in the browser), `help`, `back`, `exit`. Tab completes commands and sub-folders where Python's `readline` exists (not on stock Windows). Links are listed but never entered. The prompt turns green with `[root locked]` after `select`. Spaces are accepted directly or with double quotes. These are safe Python operations, never arbitrary shell commands.
 
 Example (replace path):
 
@@ -97,19 +108,21 @@ Before selection navigation is unrestricted. After `select`, `Navigator.cd` uses
 
 Stage 1 runs the same `Predictor` checkpoint and encoder over metadata batches. Stage 2 separately requests `INSPECT` before `inspect_candidates` reads only the top K accessible supported files. Declining opens no candidate contents. Disabling `FULL_SCAN_ALLOW_CONTENT_INSPECTION` removes this stage entirely. Paths themselves may reveal sensitive metadata, so handle local reports appropriately.
 
+Rescans are fast and interrupted scans resume: `outputs/scan_history.sqlite3` remembers every file's size, modified time and score, and a file whose size and time are unchanged keeps its saved score instead of going through the CNN again (only for the same `model.pt`; `REUSE_UNCHANGED_SCORES = False` disables this). So after Ctrl+C, scanning again re-lists folders but skips re-scoring finished files, and the menu says when a previous full scan stopped early. Each result is marked new, changed or unchanged since the last scan; `results --changed` lists only what changed.
+
 Progress is one self-updating line (count, files/s, elapsed) on a terminal and an occasional plain line when piped; the summary then reports files evaluated, how many scored above the decision threshold, and what was skipped. Scores use the validation-tuned threshold saved in the checkpoint (see below). `MAX_FILES_TO_SCAN` bounds a run; Ctrl+C cancels enumeration/inference while retaining completed batches. Paths and CSV rows are written incrementally. SQLite stores scores on disk and streams a final descending CSV; memory does not grow with the complete file list. The console displays the top K; the CSV contains every rank. Inspection traverses sorted candidates lazily and skips failed files until K successful supported inspections.
 
 ## CNN operations and mathematics
 
-Each relative path, e.g. `documents/employees.csv`, is one example. No entire tree, contents, drive letter, absolute root, size or timestamp enters this checkpoint's CNN.
+Each relative path, e.g. `documents/employees.csv`, is one example. No entire tree, contents, drive letter, absolute root or timestamp enters the CNN. File size enters only when `USE_METADATA_FEATURES = True` (see below).
 
-1. `PathEncoder.encode` lowercases, converts separators to `/`, maps characters to integer IDs (0 padding, 1 unknown), keeps the last 160 characters, and right-pads. Keeping the suffix preserves filenames. Neural layers perform arithmetic, so text needs numerical encoding.
+1. `PathEncoder.encode` lowercases, converts separators to `/`, folds accents when the checkpoint says so (`nómina` -> `nomina`; `STRIP_ACCENTS`), maps characters to integer IDs (0 padding, 1 unknown), keeps the last 160 characters, and right-pads. Keeping the suffix preserves filenames. Neural layers perform arithmetic, so text needs numerical encoding.
 2. `PathCNN.embedding` learns 16 numbers per character: `[B,L] -> [B,L,16]`. IDs are lookup indexes, not character similarity scores.
 3. `PathCNN.conv` receives the transposed `[B,16,L]` tensor. Its 32 filters slide across five-character windows. Each output is a learned weighted sum plus bias: `h[b,f,t] = bias[f] + sum(W[f,c,j] * E[b,c,t*stride+j-padding])`. Default output: `[B,32,L]`.
 4. `torch.relu` computes `max(0,h)`, adding nonlinearity.
 5. `features.amax(dim=2)` takes each filter's strongest match across all positions: `[B,32]`. A fragment can matter anywhere in a path; exact location information is lost.
-6. Training-only dropout disables 20% of pooled features. `nn.Linear` computes a weighted sum plus bias: `[B,32] -> [B,1]`, squeezed to `[B]`, one raw logit per path.
-7. During inference, `sigmoid(z) = 1/(1+exp(-z))` produces [0,1] scores. These are model predictions, **not necessarily calibrated probabilities**. The threshold creates binary decisions; ranking uses continuous scores and includes lower-scored paths.
+6. Training-only dropout disables 20% of pooled features. With `USE_METADATA_FEATURES`, 8 extra numbers (log file size, folder depth, has-extension, file-type group) are concatenated: `[B,32] -> [B,40]`. `nn.Linear` computes a weighted sum plus bias: `[B,32 or 40] -> [B,1]`, squeezed to `[B]`, one raw logit per path. This is still the same single CNN; the extra inputs only widen its final layer.
+7. During inference, `sigmoid(z / T) = 1/(1+exp(-z/T))` produces [0,1] scores, where the temperature `T` (saved with the checkpoint, 1.0 when not calibrated) only softens over-confident logits and never changes the ranking. These are model predictions, **not guaranteed probabilities**; the training report shows how well they are calibrated. The threshold creates binary decisions; ranking uses continuous scores and includes lower-scored paths.
 
 The actual learning mathematics lives in `model.py` and `train.py`: `BCEWithLogitsLoss`, `loss.backward()` (chain-rule gradients), and `optimizer.step()` (Adam weight updates). Binary cross-entropy fits two labels: `-[y log(sigmoid(z)) + (1-y) log(1-sigmoid(z))]`. The logits loss combines these operations stably; do not sigmoid logits before this loss. Adam is an optimizer for the same CNN, not another prediction algorithm. Regex inspection is deterministic, not ML.
 
@@ -145,11 +158,18 @@ Edit **`config.py`**, beneath the highly visible CHANGE ME comments. Every confi
 | `CHECKPOINT_BY` | "auc": keep the epoch with the best validation ranking | "loss" keeps the lowest validation loss |
 | `AUGMENT_TRAINING_PATHS`, `AUGMENT_PROBABILITY` | True, 0.5: vary paths each epoch | Higher = more variety; False trains on the raw paths |
 | `NUM_THREADS` | 2: CPU threads for training and inference | Faster / heavier on the computer |
+| `USE_METADATA_FEATURES` | False: paths only | True adds size, depth and type group as CNN inputs; synthetic sizes carry no label signal, so this helps once you have feedback labels |
+| `STRIP_ACCENTS` | True: fold accents before encoding | False treats accented letters as unknown characters |
+| `CALIBRATE_SCORES` | True: fit a softening temperature on validation | False keeps raw sigmoid scores |
+| `USE_FEEDBACK`, `FEEDBACK_REPEAT` | True, 3: your review decisions join training, each repeated 3 times per epoch | Higher trusts your labels more |
+| `SWEEP_GRID` | filters 16/32/64, kernel 3/5/7, dropout 0.2/0.4 | Settings tried by `train.py --sweep` |
+| `REUSE_UNCHANGED_SCORES` | True: unchanged files keep saved scores | False re-scores everything |
+| `QUARANTINE_DIRECTORY`, `RESULTS_PAGE_SIZE` | outputs/quarantine, 20 | Where quarantined files go; rows per results page |
 | `TOP_K_FILES` | 10: limited content checks | More content read / fewer checks |
 | `INFERENCE_BATCH_SIZE` | 64: bounded CPU batches | More memory/throughput / more overhead |
 | `MAX_INSPECTION_BYTES` | 262144: bounded reading | More coverage / faster partial checks |
 
-Other centralized controls: `DEFAULT_SCAN_MODE`, `MAX_FILES_TO_SCAN`, `INCLUDE_HIDDEN_FILES`, `SHOW_SCAN_PROGRESS`, `SUPPORTED_EXTENSIONS`, `TEST_DIRECTORY`, `OUTPUT_DIRECTORY`, `DATA_DIRECTORY`, `FULL_SCAN_REQUIRE_CONFIRMATION`, `FULL_SCAN_ALLOW_CONTENT_INSPECTION`, `EXCLUDED_DIRECTORIES`, `FOLLOW_SYMLINKS`. More exclusions reduce coverage. Hidden entries are included by default. None removes the explicit file limit. Links are always disabled; setting True is rejected. Inspection can read UTF-8 text formats (`.txt .csv .tsv .log .md .json .xml .ini .cfg .yaml .yml .gitignore`); `SUPPORTED_EXTENSIONS` selects among them, and anything else needs a new reader in `inspection.py`. Disabling metadata confirmation is only for deliberate authorized automation; contents still require separate approval.
+Other centralized controls: `DEFAULT_SCAN_MODE`, `MAX_FILES_TO_SCAN`, `INCLUDE_HIDDEN_FILES`, `SHOW_SCAN_PROGRESS`, `SUPPORTED_EXTENSIONS`, `TEST_DIRECTORY`, `OUTPUT_DIRECTORY`, `DATA_DIRECTORY`, `FULL_SCAN_REQUIRE_CONFIRMATION`, `FULL_SCAN_ALLOW_CONTENT_INSPECTION`, `EXCLUDED_DIRECTORIES`, `FOLLOW_SYMLINKS`. More exclusions reduce coverage. Hidden entries are included by default. None removes the explicit file limit. Links are always disabled; setting True is rejected. Inspection can read text formats (`.txt .csv .tsv .log .md .json .xml .ini .cfg .yaml .yml .gitignore .ics .vcf`), email (`.eml`), Office (`.docx .xlsx .pptx`), zip archives and, with pypdf, `.pdf`; `SUPPORTED_EXTENSIONS` selects among them, and anything else needs a new reader in `inspection.py`. Disabling metadata confirmation is only for deliberate authorized automation; contents still require separate approval.
 
 One convolution is deliberate. More layers (an edit to `model.py`, with matching saved settings) could combine fragments into longer features, but increase runtime, explanation complexity and overfitting risk. Ensure kernel/stride/padding yield a positive output length when experimenting.
 
@@ -157,9 +177,15 @@ One convolution is deliberate. More layers (an edit to `model.py`, with matching
 
 The generator chooses fictional PII-bearing or benign contents first and records their known truth, never deriving a label from filename keywords or inspection rules. Filenames often correlate with contents but include misleading generic positives and personal/payroll-named negatives. Employee records, personnel docs, contacts, payroll, personal schedules, meeting notes, general documentation, configs and unrelated texts are represented.
 
-It stratifies labels, shuffles template families with the seed, splits whole families, then generates random suffixes *inside* each split. No numbered variant of the same path template crosses splits. The corpus has 52 hand-written families plus 140 reproducible programmatic ones built from word pools (sensitive, neutral and benign folder and file words, with deliberate decoys such as benign `payroll_blank` files and PII-bearing `item`/`data` files). Default rounding gives 1608 training, 336 validation and 360 test examples; the original 40-family corpus had only six validation families, which made checkpoint selection noisy. Shared semantic words support transfer; synthetic examples are still correlated and do not establish real-world accuracy, and decoy families cap the accuracy any path-only model can reach.
+It stratifies labels, shuffles template families with the seed, splits whole families, then generates random suffixes *inside* each split. No numbered variant of the same path template crosses splits. The corpus has 52 hand-written families plus 180 reproducible programmatic ones built from word pools (sensitive, neutral and benign folder and file words in English, Spanish, French, German, Italian and Portuguese, with deliberate decoys such as benign `payroll_blank` files and PII-bearing `item`/`data` files). Programmatic families take realistic shapes: dated (`2024-03 payroll {id}`), versioned (`salary_final ({id})`), deeply nested and whole-folder families, with `.xlsx`, `.docx` and `.pdf` names shared by both labels. Each record also gets a file size drawn independently of its label. Default rounding gives 1944 training, 408 validation and 432 test examples; the original 40-family corpus had only six validation families, which made checkpoint selection noisy. Shared semantic words support transfer; synthetic examples are still correlated and do not establish real-world accuracy, and decoy families cap the accuracy any path-only model can reach.
 
 Each epoch trains on freshly augmented paths (random neutral parent folders, `_`/`-`/space swaps, copy suffixes such as ` (1)` or `_final`, and an occasional typo; labels never change), shuffles batches, computes a class-weighted loss, backpropagates, clips gradients and updates embedding/convolution/output weights with AdamW. The learning rate halves after three flat validation epochs and training stops after eight epochs without improvement (Ctrl+C also stops cleanly and keeps the best epoch). Validation disables gradients and dropout. The epoch with the best validation **ROC AUC** (ranking quality, which is what scans use; loss breaks ties) is saved; `CHECKPOINT_BY = "loss"` restores loss-based selection. The decision threshold is then tuned on validation data only (F-beta with beta 2, the median of tied cutoffs) and saved inside `model.pt`; the held-out test set is evaluated once at the end. The JSON records per-epoch loss, AUC, F1 and learning rate, test precision/recall/F1/AUC/accuracy/confusion counts, the threshold, an all-positive baseline, seed and maximum convolution-weight change. Precision measures correctness among predicted positives; recall measures positives found; F1 combines them. Zero-denominator cases return zero.
+
+After selecting the best epoch, training fits a temperature on validation logits (only values of 1 or more are allowed: a nearly separable validation set otherwise asks for sharper scores, which over-state confidence on harder paths), then tunes the threshold on the calibrated validation scores. The report prints expected calibration error before and after with a reliability table, and an **error analysis**: which test path families and words produce false alarms and missed PII, saved in `training_metrics.json` under `errors`. Use it to decide which training families to add.
+
+**Learning from your decisions.** Every review decision (keep, not PII, quarantine, recycle) is saved to `data/feedback.json` as the file's path relative to the scan root plus a label. When `USE_FEEDBACK` is on, the next training run adds these to the training split (repeated `FEEDBACK_REPEAT` times); validation and test stay synthetic so scores remain comparable. The file stays on your computer and is git-ignored.
+
+`python train.py --sweep` tries every combination in `SWEEP_GRID` on the same data, ranks them by **validation** AUC (loss breaks ties), prints the best settings and saves `outputs/sweep.json`; it changes nothing until you copy the values into `config.py` and retrain. The test score of the chosen setting is shown once for reference only.
 
 Two built-in checks cover the points below. `python train.py --control` retrains the same CNN on shuffled labels (saving nothing) and compares test AUC with the real run; `python train.py --seeds 5` repeats training over consecutive seeds on the same data and reports mean, standard deviation and range. Other options: `--epochs N`, `--seed S`.
 
@@ -173,20 +199,63 @@ To check learning rather than memorization:
 
 ## Verification behavior and limitations
 
-`inspection.inspect_file` revalidates containment before reading at most the byte cap. Text checks email, phone, SSN-like, labeled name, labeled date-of-birth and street-address patterns, plus credit-card numbers that pass the Luhn checksum. CSV/TSV uses `csv.DictReader`: non-empty cells under recognizable column headers (`email`, `phone`, `ssn`, `dob`, `address`, `card_number`, name columns ...) count too, without double counting a value the patterns already found. Each file gets a plain-language severity: High (an SSN-like or card number, or three or more categories), Medium (two), Low (one). `.gitignore` reports sensitive filename/directory **metadata clues**, not proof of PII. Unsupported files are ranked but never opened for inspection. The console prints categories with occurrence counts, never matched values, and `outputs/inspection_report.csv` saves the same counts per file as a review list. Nothing is ever deleted by this program: review the list and remove files yourself.
+`inspection.inspect_file` revalidates containment before reading at most the byte cap. Readers turn each format into bounded text: plain text with BOM detection, a UTF-16 heuristic, strict UTF-8 and a Windows-1252 fallback (the detected encoding is recorded); Office documents from their XML parts (streamed with the byte cap, never trusting declared sizes); PDFs page by page (at most 50 pages) when pypdf is installed; zip archives member by member (at most 50 readable members, nested archives and encrypted members skipped); email headers and text bodies; vCard and calendar names. Checks then count email; US and international phone numbers; SSN-like numbers (an impossible structure such as area 000, 666 or 9xx, group 00 or serial 0000 counts only when the line labels it as an SSN); labeled names, dates of birth, passport, driver's-license and bank-account numbers; ABA routing numbers that pass their checksum; IBANs that pass mod-97; street addresses; and credit-card numbers that pass the Luhn checksum. CSV/TSV uses `csv.DictReader`: non-empty cells under recognizable column headers (`email`, `phone`, `ssn`, `dob`, `address`, `card_number`, name columns ...) count too, without double counting a value the patterns already found. Each file gets a plain-language severity: High (any government, card or bank identifier, or three or more categories), Medium (two), Low (one). `.gitignore` reports sensitive filename/directory **metadata clues**, not proof of PII. Unsupported files are ranked but never opened for inspection. The console prints categories with occurrence counts, never matched values, and `outputs/inspection_report.csv` saves the same counts per file as a review list. Nothing is ever permanently deleted by this program; see *Reviewing and cleaning up*.
 
-Statuses distinguish detected indicators, no supported indicators, unsupported inspection and failed inspection. Truncation is reported. No indicators **does not prove absence of PII**. Rules have false positives/negatives, SSN-like strings are not verified identities, and UTF-8 replacement can miss other encodings. Physical addresses, detailed schedules, PDF/Office/binary parsing are future extensions.
+Statuses distinguish detected indicators, no supported indicators, unsupported inspection and failed inspection. Truncation is reported. No indicators **does not prove absence of PII**. Rules have false positives/negatives, identifier checks are structural (a valid checksum does not prove a real account), scanned-image PDFs have no text to read, legacy `.doc`/`.xls`/`.msg` binaries are not parsed, and encoding detection is heuristic.
 
 This educational implementation rechecks paths but is not a race-free boundary against an adversary changing links during traversal/opening/tree execution. Use a stable authorized synthetic tree. Generated output, dataset, environment and Git folders of this checkout are excluded to avoid feedback into scans. Reports contain metadata only. Disk usage still grows with file count. Ctrl+C during final sorting/report writing may leave a partial CSV; completed batches remain in SQLite. Application code never elevates filesystem permissions.
+
+## Reviewing and cleaning up flagged files
+
+After a scan, `review` (navigator), menu option 5, `run.bat` option 7 or `python main.py review` steps through every inspected file that has PII indicators (`--all` includes the rest). For each file you see its severity, indicator counts, CNN score and size, then choose:
+
+- **o** open it in its default application (to look before deciding);
+- **k** keep: it is PII, leave it where it is;
+- **n** not PII: a false alarm;
+- **q** quarantine: after a y/N confirmation, move it to `outputs/quarantine/<id>/` and record where it came from; `restore` (or menu option 6) puts it back and refuses to overwrite anything;
+- **r** recycle: after a y/N confirmation, send it to the Windows Recycle Bin (or the macOS/Linux Trash), where it can be restored by the operating system;
+- **s** skip, **x** stop.
+
+Nothing is permanently deleted. Every decision except skip is also saved as a training label (see *Learning from your decisions*). Files that no longer exist are left out, and actions refuse links and missing files.
+
+## Reports, results and folders
+
+`results` pages through the ranked list of the last scan with filters that combine: `--high` (above the threshold), `--ext csv`, `--folder Documents` (any folder of that name below the root), `--changed` (new or changed since the previous scan). `next` and `prev` move between pages. `folders [depth]` ranks folders by how many files score above the threshold, then by their highest and mean score, which shows where PII clusters. `report` writes a self-contained HTML page (summary cards, verified files with indicator counts, riskiest folders, top 50 paths; light and dark mode) and opens it. The report contains paths from your computer, so keep it private.
+
+## Settings menu
+
+Menu option 7 lists the scan options people change most (`TOP_K_FILES`, `MAX_FILES_TO_SCAN`, `INCLUDE_HIDDEN_FILES`, `SHOW_SCAN_PROGRESS`, `PREDICTION_THRESHOLD`, `AUTO_TUNE_THRESHOLD`, `MAX_INSPECTION_BYTES`, `REUSE_UNCHANGED_SCORES`). Changes are checked (for example a threshold must lie between 0 and 1) and apply to the session; **s** saves only values that differ from `config.py` into `user_settings.json`, which overrides `config.py` on the next start, and **r** resets everything to `config.py`. Model and training settings stay in `config.py` because they require retraining.
+
+## Command line
+
+`python main.py` with no arguments opens the menu. Commands for scripts and quick use:
+
+```powershell
+python main.py scan "C:\Users\me\Documents" --top 20 --html   # rank, verify the top 20, write and open the report
+python main.py scan "C:\Users\me\Documents" --no-inspect        # rank names only; opens no file contents
+python main.py scan "D:\Shared" --fail-on-pii                     # exit code 3 when any verified file has indicators
+python main.py results --high --ext xlsx --limit 100
+python main.py report --no-open
+python main.py review
+python main.py restore
+python main.py full                                               # still asks for SCAN and INSPECT
+python main.py train --epochs 30
+```
+
+Passing a folder to `scan` is the authorization for that folder (like selecting it in the navigator); links and junctions are refused as roots. `full` keeps both approvals unless `--yes` (metadata scan) and `--inspect` (content check) are given explicitly for authorized automation. Exit codes: 0 success, 1 failure or cancelled, 2 bad arguments, 3 PII found with `--fail-on-pii`.
+
+## Continuous integration
+
+`.github/workflows/tests.yml` runs on every push and pull request on **Windows and Linux** with Python 3.11 and 3.13: it installs CPU PyTorch and the optional PDF reader, runs all unit tests (on Windows this includes the junction-boundary and fixed-drive tests that are skipped elsewhere), runs the synthetic demo, and exercises the command line. Check the Actions tab on GitHub for results.
 
 ## Lesson 36 and Lesson 41
 
 Lesson 36 delivers the real trainable CPU CNN, reproducible content-ground-truth data, family-disjoint evaluation, model persistence, shared two-mode inference, root-locked navigation, drive discovery, incremental ranked reports, explicit broad-scan approvals, limited deterministic verification, tests and synthetic demo.
 
-Suggested Lesson 41 extensions (confirm against your course rubric): larger independently designed datasets, repeated-seed experiments, error analysis, calibration evaluation, CNN hyperparameter experiments without new ML algorithms, resumable scans, stronger cancellation/report recovery, additional approved parsers, multilingual paths, address/schedule verification and stronger filesystem-race protection. This checkpoint prioritizes likely PII; it does not certify file safety.
+Lesson 41 extensions now implemented (confirm against your course rubric): a larger dataset with realistic and multilingual families, repeated-seed experiments, a shuffled-label control, error analysis, calibration evaluation, a validation-only hyperparameter sweep of the same CNN, resumable scans with change tracking, additional parsers (Office, PDF, zip, email, contacts, calendars), address and identifier verification, and learning from your own review decisions. Still open: stronger filesystem-race protection, schedule verification, legacy binary Office/Outlook formats and OCR for scanned PDFs. This checkpoint prioritizes likely PII; it does not certify file safety.
 
 ## Verification in the development environment
 
-The original synthetic demo was run on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The training, inspection, scanner and terminal changes described above were developed and tested on Linux (Python 3.13, PyTorch 2.15.0 from PyPI): all 28 `unittest` tests pass with two Windows-only tests skipped (junction boundary and fixed-drive discovery), and the scripted menu and navigator sessions ran correctly. **They have not been re-run on Windows**, so `tree.com`, junctions, `run.bat` and the Windows console's color handling need a quick check on your machine.
+The original synthetic demo was run on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The later changes were developed on Linux (Python 3.13, PyTorch 2.15.0 from PyPI, pypdf 7.1.1): all 51 `unittest` tests pass with two Windows-only tests skipped (junction boundary and fixed-drive discovery), the menu, navigator, review, settings and command line were driven with scripted input and in a real terminal, and the HTML report was rendered in a browser at desktop and phone widths. **They have not been run on Windows here**: the CI workflow runs the whole suite, including the Windows-only tests, on Windows for every push, and `run.bat`, `tree.com`, the Recycle Bin and console colors still deserve a quick manual check.
 
-Default-seed results on the current synthetic corpus (held-out test, 360 paths): precision 0.737, recall 0.933, F1 0.824, ROC AUC 0.880 at a validation-tuned threshold of 0.48; the all-positive baseline F1 is 0.667. Five consecutive seeds gave F1 0.800 +/- 0.035 (range 0.735-0.827) and AUC 0.871 +/- 0.028. The shuffled-label control scored AUC 0.52 against 0.88 for real labels, so the CNN is learning from the labels rather than memorizing. The remaining errors are mostly decoy families (benign files with sensitive-sounding names), which no path-only model can separate; this is why verification reads the contents of the top files. Scores here are on synthetic data and do not establish real-world accuracy. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings.
+Default-seed results on the current synthetic corpus (held-out test, 432 paths): precision 0.797, recall 0.857, F1 0.826, ROC AUC 0.945; the all-positive baseline F1 is 0.667. Five consecutive seeds gave F1 0.851 +/- 0.016 (range 0.826-0.873) and AUC 0.931 +/- 0.017. The shuffled-label control scored AUC 0.45 against 0.95 for real labels, so the CNN learns from the labels rather than memorizing. The sweep confirmed the default architecture (32 filters, kernel 5, dropout 0.2) as best on validation. Calibration: expected calibration error is 0.12; validation is nearly separable, so the fitted temperature stays at 1.0; the remaining over-confidence most likely comes from decoy families that happen to be rarer in validation than in test. The error analysis attributes most mistakes to those decoys (for example benign `reports/weather` files and PII-bearing files named only `records` or in other languages), which no path-only model can separate; this is why verification reads the contents of the top files. Scores here are on synthetic data and do not establish real-world accuracy. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings.
