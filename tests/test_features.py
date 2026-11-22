@@ -209,12 +209,17 @@ class ScanEngineTests(Base):
         self.assertEqual((meta["files"], meta["reused"]), (3, 1))
 
     def test_html_report_escapes_and_has_no_values(self):
-        (self.root / "<i>x&.txt").write_text("Email: secret@example.invalid", encoding="utf-8")
+        # & and ' are valid in Windows file names; < and > only elsewhere.
+        name = "Tom & Jerry's.txt" if os.name == "nt" else "Tom & Jerry's <i>.txt"
+        (self.root / name).write_text("Email: secret@example.invalid", encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
             inference.print_inspections(scan([self.root], predictor=Predictor(self.checkpoint())), approved=True)
         page = report.write_html_report().read_text(encoding="utf-8")
-        self.assertIn("&lt;i&gt;x&amp;.txt", page)
-        self.assertNotIn("<i>x", page)
+        self.assertIn("Tom &amp; Jerry&#x27;s", page)
+        self.assertNotIn("Tom & Jerry's", page)
+        if os.name != "nt":
+            self.assertIn("&lt;i&gt;.txt", page)
+            self.assertNotIn("<i>.txt", page)
         self.assertNotIn("secret@example.invalid", page)
         self.assertIn("Email x1", page)
 
