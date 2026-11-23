@@ -117,6 +117,7 @@ def generate():
     proportions = [config.TRAIN_SPLIT, config.VALIDATION_SPLIT, config.TEST_SPLIT]
     if min(proportions) <= 0 or abs(sum(proportions) - 1) > 1e-8:
         raise ValueError("Positive split proportions must sum to 1")
+    print("Generating synthetic training data (a few thousand small files)... please wait.", flush=True)
     rng = random.Random(config.RANDOM_SEED)
     # File sizes are drawn independently of the label (only feedback from real files can make
     # size informative); they feed the optional metadata features.
