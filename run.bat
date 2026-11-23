@@ -33,6 +33,9 @@ if errorlevel 2 goto mode2
 goto mode1
 
 :mode1
+echo.
+echo Starting Mode 1 - Controlled Directory Scan... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :ready
 if errorlevel 1 goto failed
 "%PYTHON%" -c "from main import navigate; navigate()"
@@ -40,6 +43,9 @@ if errorlevel 1 goto failed
 goto menu
 
 :mode2
+echo.
+echo Starting Mode 2 - Full Computer Scan... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :ready
 if errorlevel 1 goto failed
 "%PYTHON%" -c "from main import full_mode; full_mode()"
@@ -47,6 +53,9 @@ if errorlevel 1 goto failed
 goto menu
 
 :review
+echo.
+echo Opening the review of flagged files... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :runtime
 if errorlevel 1 goto failed
 "%PYTHON%" main.py review
@@ -55,6 +64,9 @@ pause
 goto menu
 
 :report
+echo.
+echo Building the HTML report of the last scan... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :runtime
 if errorlevel 1 goto failed
 "%PYTHON%" main.py report
@@ -62,6 +74,9 @@ if errorlevel 1 goto failed
 goto menu
 
 :fullmenu
+echo.
+echo Opening the full menu... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :ready
 if errorlevel 1 goto failed
 "%PYTHON%" main.py
@@ -69,6 +84,9 @@ if errorlevel 1 goto failed
 goto menu
 
 :training
+echo.
+echo Starting data generation and training... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :runtime
 if errorlevel 1 goto failed
 call :train
@@ -78,6 +96,9 @@ pause
 goto menu
 
 :demo
+echo.
+echo Starting the complete synthetic demo... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :runtime
 if errorlevel 1 goto failed
 "%PYTHON%" demo.py
@@ -86,12 +107,17 @@ pause
 goto menu
 
 :settings
+echo.
+echo Opening config.py in Notepad... please wait.
 echo Edit config.py, save it, then return to this menu.
 echo After changing model, encoder, or training settings, use option 3 to retrain.
 start "" /wait notepad.exe "%CD%\config.py"
 goto menu
 
 :setup
+echo.
+echo Starting dependency install / repair... please wait.
+echo Loading Python and PyTorch can take up to a minute; the window is working, not frozen.
 call :environment
 if errorlevel 1 goto failed
 call :install
@@ -117,6 +143,7 @@ if errorlevel 1 exit /b 1
 exit /b %errorlevel%
 
 :runtime
+echo Checking Python and PyTorch...
 call :environment
 if errorlevel 1 exit /b 1
 "%PYTHON%" -c "import numpy; import torch; torch.from_numpy(numpy.zeros(1))" >nul 2>&1
