@@ -4,6 +4,27 @@ A Windows-first terminal application using **exactly one machine learning algori
 
 Use generated synthetic files for demonstrations. Other directories and computers require ownership or explicit audit authorization. Tests and the demo never scan real drives.
 
+## Quick start for graders
+
+Windows, about 5 minutes, no real personal data involved:
+
+1. Install 64-bit Python 3.11 or newer (from python.org, with "Add python.exe to PATH" checked).
+2. Clone or download this repository and double-click **`run.bat`**.
+3. Choose **6** (install dependencies; needs internet once), then **4** (complete synthetic demo).
+4. Optional: `.\.venv\Scripts\python -m unittest discover -s tests -v` runs all automated tests (expected: `OK`, a few Windows/OCR-specific tests may be skipped).
+
+What the demo shows, in order:
+
+| Output | What it demonstrates |
+|---|---|
+| Per-epoch table and loss chart | The CNN training: training loss falls, validation AUC rises, the best epoch is kept |
+| "Held-out test" table | Precision, recall, F1 and ROC AUC on path families never seen in training (about 0.83 F1 and 0.95 AUC) |
+| "Highest-risk paths" table | The trained CNN ranking the files in `synthetic_demo`; `employees.csv`, `item.txt` and `schedule.txt` score highest |
+| "Content verification" | Deterministic rules confirming which top files really contain (fictional) PII, as counts only |
+| HTML report path | A browser-viewable summary of the scan |
+
+Everything uses generated, fictional data. The program never deletes files on its own.
+
 ## Windows installation and complete demonstration
 
 For the quickest start, install 64-bit Python 3.11 or newer, then double-click **`run.bat`** (or run `.\run.bat` from PowerShell). The launcher works from any working directory. Choose **1** for a controlled directory scan or **2** for a full computer scan. On first use it creates `.venv`, installs CPU dependencies (internet required), and generates synthetic training data and trains if no checkpoint exists. Later scans reuse the saved checkpoint. Full scans keep the existing `SCAN` and `INSPECT` approval prompts.
@@ -255,8 +276,67 @@ Lesson 36 delivers the real trainable CPU CNN, reproducible content-ground-truth
 
 Lesson 41 extensions now implemented (confirm against your course rubric): a larger dataset with realistic and multilingual families, repeated-seed experiments, a shuffled-label control, error analysis, calibration evaluation, a validation-only hyperparameter sweep of the same CNN, resumable scans with change tracking, additional parsers (Office, PDF, zip, email, contacts, calendars), address and identifier verification, and learning from your own review decisions. Also implemented since: race-safe file opening, schedule verification, legacy Office/Outlook files, and OCR for images and scanned PDFs. Remaining ideas: a full OLE parser, non-English schedule words, and directory-level race protection during traversal (files are protected at open time). This checkpoint prioritizes likely PII; it does not certify file safety.
 
+## Correctness checks
+
+The repository has 62 automated `unittest` tests (`tests/`), run on Windows and Linux for every push by GitHub Actions (`.github/workflows/tests.yml`). The checks below are the most important ones for the CNN and the safety rules. Each one states what is checked, what correct behavior looks like, and the observed result. Run any single test with `python -m unittest -v tests.<file>.<Class>.<test>`.
+
+| # | Check (test) | What it verifies | Expected behavior | Observed result |
+|---|---|---|---|---|
+| 1 | `test_project.ProjectTests.test_cnn_shape_and_gradient` | The CNN's forward pass and backpropagation | 3 encoded paths give an output of shape `[3]` (one logit each); after one gradient step the convolution weights are different | Pass: shape `(3,)`, weights changed |
+| 2 | `test_project.ProjectTests.test_preprocessing` | Path encoding feeding the CNN | `ABC\x.txt` and `abc/x.txt` encode identically; output length is always `MAX_PATH_LENGTH`; unknown characters get ID 1; long paths keep their END (the filename) | Pass |
+| 3 | `train.py --control` (also `test_improvements.ImprovementTests.test_short_training_run_and_shuffled_control`) | The CNN learns from the labels rather than memorizing | Retraining the same CNN on **shuffled** labels should fall to chance (AUC near 0.5), while real labels score far higher | Real labels: test AUC **0.945**, F1 0.826. Shuffled labels: AUC **0.453**, F1 0.667 (= the predict-everything baseline) |
+| 4 | `test_project.ProjectTests.test_group_split_and_reproducibility` | Honest evaluation data | The same seed regenerates the identical dataset; no path family appears in more than one of train/validation/test; every label matches the file's real contents | Pass: splits are family-disjoint and labels match contents |
+| 5 | `test_improvements.ImprovementTests.test_metrics_auc_and_threshold` | The evaluation math | On hand-made examples: perfect ranking gives AUC 1.0, reversed gives 0.0, ties give 0.5; the confusion matrix counts are exact; the tuned threshold separates the classes | Pass |
+| 6 | `test_project.ProjectTests.test_both_modes_same_checkpoint_and_absolute_reports` | Inference matches the model | Both scan modes use one checkpoint; every score written to the report equals `Predictor.scores` for that path; no file contents are read during ranking | Pass |
+| 7 | `test_project.ProjectTests.test_navigation_lock`, `test_escaping_link` | Scans stay inside the authorized folder | After `select`, `cd ..` at the root, absolute outside paths and links/junctions are refused, and enumeration never follows a link out | Pass (the Windows junction version passes in CI on Windows) |
+| 8 | `test_project.ProjectTests.test_full_mode_approval_gate` | Full-computer scans need explicit approval | Without typing `SCAN` nothing is scanned; without `INSPECT` no file is opened | Pass |
+| 9 | `test_project.ProjectTests.test_inspection_categories_and_no_values` | Content verification and privacy | A fictional file with a name, email, phone and SSN is flagged in all four categories at High severity, and the matched values never appear in the result | Pass |
+| 10 | `test_hardening.HardeningTests.test_file_replaced_between_check_and_open_is_refused` | Race-safe reading | If a file is swapped for a different file between the safety check and opening, it is refused | Pass |
+
+Held-out results above are on synthetic data. They show the algorithm works as designed, not real-world accuracy.
+
 ## Verification in the development environment
 
 The original synthetic demo was run on Windows, Python 3.14 and PyTorch 2.15.0+cpu. The later changes were developed on Linux (Python 3.13, PyTorch 2.15.0 from PyPI, pypdf 7.1.1): all 62 `unittest` tests pass with four Windows-only tests skipped (junction boundary, fixed-drive discovery, Recycle Bin and the open-handle path check), OCR was tested with Tesseract 5.3, and the suite also passes with no optional packages installed, the menu, navigator, review, settings and command line were driven with scripted input and in a real terminal, and the HTML report was rendered in a browser at desktop and phone widths. **They have not been run on Windows here**: the CI workflow runs the whole suite, including the Windows-only tests, on Windows for every push, and `run.bat`, `tree.com`, the Recycle Bin and console colors still deserve a quick manual check.
 
 Default-seed results on the current synthetic corpus (held-out test, 432 paths): precision 0.797, recall 0.857, F1 0.826, ROC AUC 0.945; the all-positive baseline F1 is 0.667. Five consecutive seeds gave F1 0.851 +/- 0.016 (range 0.826-0.873) and AUC 0.931 +/- 0.017. The shuffled-label control scored AUC 0.45 against 0.95 for real labels, so the CNN learns from the labels rather than memorizing. The sweep confirmed the default architecture (32 filters, kernel 5, dropout 0.2) as best on validation. Calibration: expected calibration error is 0.12; validation is nearly separable, so the fitted temperature stays at 1.0; the remaining over-confidence most likely comes from decoy families that happen to be rarer in validation than in test. The error analysis attributes most mistakes to those decoys (for example benign `reports/weather` files and PII-bearing files named only `records` or in other languages), which no path-only model can separate; this is why verification reads the contents of the top files. Scores here are on synthetic data and do not establish real-world accuracy. No broad real-drive traversal or real personal-file inspection was performed. NumPy is included in the dependencies to prevent PyTorch missing-NumPy startup warnings.
+
+## Progress summary
+
+### Completed work
+
+**Checkpoint baseline (first three commits, Skyler):** the trainable character-level CNN (`model.py`) with PyTorch training, validation checkpointing and held-out precision/recall/F1 (`train.py`); synthetic data with content-based labels and family-disjoint splits (`generate_data.py`); the path encoder (`preprocessing.py`); the controlled-folder navigator with root locking and link/junction protection, Windows fixed-drive discovery and the full-computer scan with `SCAN`/`INSPECT` approvals (`scanner.py`, `main.py`); disk-backed ranking and reports (`inference.py`); regex verification for TXT/CSV/`.gitignore` (`inspection.py`); the `run.bat` launcher; the synthetic demo; and the original 14 tests.
+
+**Improvements after the checkpoint (Zachary):**
+
+- *Training:* class-weighted loss, AdamW, gradient clipping, learning-rate reduction, early stopping, path augmentation, checkpoint selection by validation AUC, a threshold tuned on validation, calibration, error analysis, a shuffled-label control, a repeated-seed study and a hyperparameter sweep. The dataset grew from 40 to 232 path families (realistic, dated, nested and multilingual names), which makes the held-out test harder and more trustworthy; on it the CNN reaches F1 0.826 and AUC 0.945.
+- *Verification:* Office (new and legacy), Outlook, email, PDF, zip, contacts, calendars, images and scanned PDFs (OCR). New checks: passport, driver's license, bank/routing (checksum), IBAN, cards (Luhn), dates of birth, addresses, schedules, international phones. Encoding detection and race-safe file opening.
+- *Scanning:* saved scores so rescans and interrupted scans are fast, new/changed tracking, filters, folder ranking, HTML report.
+- *Cleanup:* a review screen to open, keep, dismiss, quarantine (restorable) or send files to the Recycle Bin, with decisions reused as training labels.
+- *Interface:* redesigned terminal UI, settings menu, command-line commands with exit codes, more `run.bat` options.
+- *Quality:* 48 more tests (62 total), CI on Windows and Linux, README updates.
+
+### Remaining tasks
+
+- Manual Windows checks CI cannot do: `run.bat` menus, console colors, and opening files from the review screen.
+- Measure accuracy on real (consented, non-sensitive) folders; all reported numbers are synthetic.
+- Collect review feedback and retrain, so the model reflects real file names.
+- Improve calibration (scores are still over-confident: expected calibration error 0.12).
+- A full parser for legacy `.doc/.xls/.msg` (the current reader recovers text runs only), non-English schedule words, and race protection during directory traversal (file opening is already protected).
+
+### Challenges
+
+- **Noisy validation:** the original split had only 6 validation families, so checkpoint selection picked an under-trained model and a "flag everything" threshold. Fixed with many more families and AUC-based selection.
+- **Overfitting:** validation loss rose after a few epochs while training loss kept falling; addressed with augmentation, weight decay, early stopping and keeping the best epoch.
+- **Calibration:** fitting a temperature on a nearly separable validation set made test calibration worse (0.120 to 0.147); it is now limited to softening scores.
+- **Decoy file names:** benign files with sensitive-sounding names (and the reverse) cap what any path-only model can do; this is why the top files are verified by reading their contents.
+- **Cross-platform behavior:** a test passed on Linux but failed on Windows (a file name with `<` and `>`); CI on Windows caught it.
+
+### Contributions
+
+| Teammate | Contribution |
+|---|---|
+| **Skyler** (GitHub `skylerwuest-del`, commits by "Skyler W") | Everything in the repository through commit `4bc89d3`: the CNN, training, synthetic data, navigator, both scan modes, verification, reports, `run.bat`, demo and original tests. Built with the help of OpenAI Codex. |
+| **Zachary** (GitHub `ZacharyPoupart`) | All work after commit `4bc89d3` (pull request #1): the training, verification, scanning, cleanup, interface, testing/CI and documentation improvements listed above. Built with the help of Claude Code (Anthropic), which made the commits shown as authored by "Claude"; Zachary directed the work, reviewed it and merged it. |
+
+**AI assistance:** both teammates used AI coding assistants, as stated above. Check the course policy for any further disclosure it requires.
